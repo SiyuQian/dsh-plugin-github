@@ -11,9 +11,18 @@ Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may 
   > /pr-creator Create a pull request for the current branch (or update the existing one).
 
   If the git check fails for any reason, the prompt is still sent; the skill runs its own full preflight.
-- **PR link.** When the session folder's branch has a pull request, a link such as `#191` appears just left of the button, with a dot for its state (green open, grey draft, purple merged, red closed). Hover shows the title. Clicking it opens the PR in your default browser (Chrome on this Mac). While the PR is open or a draft, the button reads **Update PR**.
+- **PR link.** When a session has a pull request, a link such as `#191` appears just left of the button, with a dot for its state (green open, grey draft, purple merged, red closed). Hover shows the title. Clicking it opens the PR in your default browser (Chrome on this Mac). While the PR is open or a draft, the button reads **Update PR**.
+- **Sidebar title.** A session linked to a PR is renamed `#191 <PR title>`, so the sidebar shows which PR each session is about. The title follows the PR if it is renamed on GitHub.
 
-  The link comes from `gh pr view` (or `glab mr view` for GitLab), using the CLI's own login. It is looked up when the session opens, after each agent turn ends, and when you switch back to the app from another window (at most every 15 seconds). If a lookup fails, the last known link stays on screen.
+  A session is linked to a PR when:
+  - you paste a PR link into your message (for example, `https://github.com/.../pull/191 improve the docs`), or
+  - the agent runs `gh pr create` (or `glab mr create`) and it prints the new PR's URL.
+
+  The latest of these wins. A PR the agent only views, edits, or mentions does not link the session. If neither has happened, the link falls back to the PR of the session folder's current branch, without renaming the session.
+
+  A title you set yourself (double-click to rename) is never overwritten. Subagent sessions are never renamed.
+
+  PR details come from `gh pr view` (or `glab mr view`), using the CLI's own login. They are looked up when the session opens, after each agent turn ends, as soon as a link is pasted or a PR is created, and when you switch back to the app from another window (at most every 15 seconds). If a lookup fails, the last known link stays on screen.
 - **`pr-creator` skill.** Registered as a bundled skill, so it also works from the `/` menu or when you ask in plain words ("open a PR"). A `pr-creator` skill in your own or a project's skill folder takes precedence over this one.
 
 The skill does the actual work: it reads the diff against `origin/<default branch>`, creates a branch if you are on `main`, commits relevant changes, pushes, fills in the repo's PR template (or one of its own), and creates or updates the PR with `gh` or `glab`. For user-visible frontend changes, it also handles screenshots. See the vendored [SKILL.md](vendor/devpilot/skills/pr-creator/SKILL.md) for the full rules, including when it stops and asks.
@@ -53,7 +62,9 @@ The skill text itself is unchanged.
 - One click is one prompt. The skill is designed to run without asking for confirmation, so it will create the branch, commit, and push unless it hits one of its documented hard stops.
 - The button prompt is in the UI language (English or Chinese). The skill writes the PR in the language of that prompt unless the repo's convention says otherwise.
 - The preflight only reads local refs. A stale `origin/main` can make it think there is work to PR when there is not; the skill fetches before it decides.
-- Only `https` PR links are shown, and only for the folder's current branch. Looking up the link adds one `gh` call (about a second, in the background) at the end of every agent turn.
+- Only `https` PR links are shown. Looking up the link adds one `gh` call (about a second, in the background) at the end of every agent turn.
+- The rename goes through DSH's own title service, the same as renaming by hand, so it is recorded as a user title in the session log. Titles are cut at DSH's 80-byte limit.
+- Sessions are renamed only while open in DSH. An old session picks up its PR title the next time you open it.
 - Notices appear above the message box. If that is unavailable, the plugin falls back to a native alert.
 
 ## Test

@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	PREFLIGHT_METHOD, PROVIDER_NAME, SKILL_DIR, SKILL_NAME, STATUS_METHOD,
-	apply, createSkillProvider, hostOf, parseSkill, preflight, preflightRoute, prStatus, statusRoute
+	SESSION_STATUS_METHOD, apply, argumentText, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
+	parseSkill, prByUrl, preflight, preflightRoute, prStatus, prTitle, sessionStatusRoute, statusRoute
 } from "./lib/index.js";
 
 let mod;
@@ -144,15 +145,142 @@ test("route answers the client-request envelope", async () => {
 	assert.match(relative.result.error.message, /absolute/);
 });
 
-test("host apply registers the provider and the route through injected services", () => {
+test("host apply registers the provider, the routes, and the session listeners", () => {
 	const seen = [];
 	const scope = {
 		skills: { registerProvider: (create) => seen.push(["provider", create({ signal: undefined, invalidate() {} }).name]) },
-		get: (n) => n === "connection" ? { fetch: { register: (route) => seen.push(["route", route.path]) } } : undefined,
-		effect: (fn) => fn()
+		get: (n) => ({
+			connection: { fetch: { register: (route) => seen.push(["route", route.path]) } },
+			sessions: { get: () => undefined }
+		})[n],
+		effect: (fn) => fn(),
+		on: (event) => seen.push(["on", event])
 	};
 	apply({ inject: (_deps, cb) => cb(scope) });
-	assert.deepEqual(seen, [["provider", PROVIDER_NAME], ["route", `/api/${PREFLIGHT_METHOD}`], ["route", `/api/${STATUS_METHOD}`]]);
+	assert.deepEqual(seen, [
+		["provider", PROVIDER_NAME],
+		["route", `/api/${PREFLIGHT_METHOD}`],
+		["route", `/api/${STATUS_METHOD}`],
+		["route", `/api/${SESSION_STATUS_METHOD}`],
+		["on", "session/event"],
+		["on", "session/created"]
+	]);
+});
+
+// --- session link and title -------------------------------------------------
+
+const userMsg = (text, kind = "user") => ({ type: "user/message", data: { content: [{ type: "text", text }], source: { kind } } });
+const call = (callId, command) => ({ type: "tool/call", data: { callId, name: "bash", arguments: JSON.stringify({ description: "d", command }) } });
+const result = (callId, text, isError = false) => ({ type: "tool/result", data: { message: { toolCallId: callId, content: [{ type: "text", text }], isError } } });
+const titleEv = (title, kind) => ({ type: "session/title", data: { title, messageSeqs: [], source: { kind } } });
+const U191 = "https://github.com/example-org/web-app/pull/191";
+const U192 = "https://github.com/example-org/web-app/pull/192";
+
+test("link: a PR URL pasted in your message links the session", () => {
+	assert.equal(linkOf([userMsg(`${U191}\n用 asd-ste100 改进一下文档`)]), U191);
+	assert.equal(linkOf([userMsg(`see ${U191}/files#diff-1`)]), U191, "deep links trim to the PR");
+	assert.equal(linkOf([userMsg(U191, "skill-invocation")]), null, "only direct human input counts");
+});
+
+test("link: the URL printed by gh pr create links the session; the latest wins", () => {
+	const create = "cat > /tmp/b.md <<'EOF'\nbody\nEOF\ngh pr create --base next --draft --title \"x\" --body-file /tmp/b.md 2>&1 | tail -1";
+	assert.equal(linkOf([userMsg(U191), call("c1", create), result("c1", `${U192}\n`)]), U192);
+	assert.equal(linkOf([call("c1", create), result("c1", "", true)]), null, "a failed create links nothing");
+});
+
+test("link: viewing, editing, or asking for help about other PRs does not relink", () => {
+	const events = [
+		userMsg(U191),
+		call("v", `gh pr view ${U192} --json title`), result("v", U192),
+		call("e", `gh pr edit 192 --body-file x`), result("e", U192),
+		call("h", "gh pr create --help"), result("h", `see ${U192}`),
+		{ type: "assistant/message", data: { message: { content: [{ type: "text", text: `Opened ${U192}` }] } } }
+	];
+	assert.equal(linkOf(events), U191);
+});
+
+test("link: tool arguments are read as text, so a newline before gh pr create still matches", () => {
+	assert.match(argumentText(JSON.stringify({ command: "echo a\ngh pr create --fill" })), /\ngh pr create/);
+	assert.equal(argumentText("not json"), "not json");
+});
+
+test("link: GitLab MR URLs", () => {
+	const mr = "https://gitlab.example.com/group/sub/project/-/merge_requests/12";
+	assert.equal(linkOf([userMsg(`${mr}/diffs`)]), mr);
+});
+
+test("title: '#191 <PR title>'; replaces automatic titles and our own, never one you typed", () => {
+	const pr = { number: 191, title: "docs: Add harness docs", state: "open", url: U191 };
+	assert.equal(prTitle(pr), "#191 docs: Add harness docs");
+	assert.equal(nextTitle([titleEv("用ASD-STE100改进PR文档", "provider")], pr), "#191 docs: Add harness docs");
+	assert.equal(nextTitle([titleEv("x", "fallback")], pr), "#191 docs: Add harness docs");
+	assert.equal(nextTitle([], pr), "#191 docs: Add harness docs");
+	assert.equal(nextTitle([titleEv("#191 docs: Add harness docs", "user")], pr), null, "already applied");
+	assert.equal(nextTitle([titleEv("#191 docs: Add har", "user")], pr), null, "a title cut at the byte cap counts as applied");
+	assert.equal(nextTitle([titleEv("#191 old PR title", "user")], pr), "#191 docs: Add harness docs", "follows a PR rename");
+	assert.equal(nextTitle([titleEv("迁移进度与测试UAT环境调查 (1)", "user")], pr), null, "your own title stays");
+	assert.equal(nextTitle([titleEv("Mine", "user")], pr, new Set(["Mine"])), "#191 docs: Add harness docs", "titles we wrote are ours to replace");
+});
+
+function liveSession(id, events, depth = 0) {
+	return { id, header: { cwd: "/ws", delegationDepth: depth }, snapshotEvents: () => events };
+}
+
+test("link manager: looks up the linked PR by URL from any folder and retitles", async () => {
+	const events = [titleEv("auto", "provider"), userMsg(U191)];
+	const session = liveSession("s1", events);
+	const renames = [];
+	const { run, calls } = fakeCli({ gh: ok({ number: 191, url: U191, state: "OPEN", isDraft: true, title: "docs: Add harness docs" }) });
+	const links = createLinkManager({ sessions: { get: (id) => (id === "s1" ? session : undefined) }, titles: { rename: (s, t) => { renames.push([s.id, t]); return { title: t }; } }, run });
+	const r = await links.status("s1", 0);
+	assert.deepEqual(r, { pr: { number: 191, url: U191, state: "draft", title: "docs: Add harness docs" } });
+	assert.deepEqual(calls[0], ["gh", "pr", "view", U191, "--json", "number,url,state,isDraft,title"], "by URL, so a parent workspace folder works");
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(renames, [["s1", "#191 docs: Add harness docs"]]);
+	assert.ok(links.ours.has("#191 docs: Add harness docs"));
+});
+
+test("link manager: cache, unlinked, not live, subagent", async () => {
+	const { run, calls } = fakeCli({ gh: ok({ number: 191, url: U191, state: "OPEN", isDraft: false, title: "t" }) });
+	const sessions = new Map([
+		["s1", liveSession("s1", [userMsg(U191)])],
+		["s2", liveSession("s2", [userMsg("hello")])],
+		["sub", liveSession("sub", [userMsg(U191)], 1)]
+	]);
+	const renames = [];
+	const links = createLinkManager({ sessions, titles: { rename: (s, t) => { renames.push(s.id); return { title: t }; } }, run });
+	await links.status("s1", 60000);
+	await links.status("s1", 60000);
+	assert.equal(calls.length, 1, "second lookup within maxAge is cached");
+	assert.deepEqual(await links.status("s2"), { pr: null, reason: "unlinked" });
+	assert.deepEqual(await links.status("gone"), { pr: null, reason: "not-live" });
+	await links.status("sub", 0);
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(renames, ["s1"], "subagent sessions are never retitled");
+});
+
+test("link manager: no title service still answers the link", async () => {
+	const { run } = fakeCli({ gh: ok({ number: 191, url: U191, state: "MERGED", isDraft: false, title: "t" }) });
+	const links = createLinkManager({ sessions: new Map([["s1", liveSession("s1", [userMsg(U191)])]]), titles: undefined, run });
+	assert.equal((await links.status("s1")).pr.state, "merged");
+});
+
+test("prByUrl: GitLab passes the project and MR number to glab", async () => {
+	const { run, calls } = fakeCli({ glab: ok({ iid: 12, web_url: "https://gitlab.com/g/p/-/merge_requests/12", state: "merged", title: "m" }) });
+	assert.equal((await prByUrl("https://gitlab.com/g/p/-/merge_requests/12", "/ws", run)).pr.state, "merged");
+	assert.deepEqual(calls[0], ["glab", "mr", "view", "12", "-R", "g/p", "-F", "json"]);
+});
+
+test("session status route requires a session id", async () => {
+	const route = sessionStatusRoute({ status: async (id, age) => ({ id, age }) });
+	const post = async (payload) => (await route.fetch(new Request("http://x" + route.path, { method: "POST", body: JSON.stringify({ rpcId: "r", method: SESSION_STATUS_METHOD, payload }) }))).json();
+	assert.deepEqual((await post({ sessionId: "s1" })).result, { ok: true, value: { id: "s1", age: 15000 } });
+	assert.equal((await post({})).result.ok, false);
+});
+
+test("real log: the plugin-dev session is not linked by its own gh pr view runs", () => {
+	const cmd = "gh pr view https://github.com/example-org/web-app/pull/191 --json number,url 2>&1; gh pr edit --help | grep -i url";
+	assert.equal(linkOf([call("c", cmd), result("c", U191)]), null);
 });
 
 // --- PR status --------------------------------------------------------------
@@ -212,7 +340,7 @@ test("status route wraps prStatus in the RPC envelope", async () => {
 	assert.deepEqual(res, { type: "server-response", rpcId: "s1", result: { ok: true, value: { pr: null, reason: "none" } } });
 });
 
-test("status store: caches by folder, skips fresh entries, keeps last link on failure", async () => {
+test("status store: caches by key, skips fresh entries, keeps last link on failure", async () => {
 	let clock = 1000;
 	const answers = [{ number: 1, url: "https://github.com/o/r/pull/1", state: "open", title: "a" }];
 	let calls = 0;
@@ -363,7 +491,7 @@ const PR = { number: 191, url: "https://github.com/example-org/web-app/pull/191"
 test("composer button: idle, labelled, keeps focus, runs for its session", () => {
 	const { tree, link, runs, refreshes } = renderAction();
 	assert.equal(link, null, "no PR, no link");
-	assert.deepEqual(refreshes, [["/repo", 0]], "looks up the PR when shown");
+	assert.deepEqual(refreshes, [["s1", 0]], "looks up the session's PR when shown");
 	assert.equal(tree.type, "Tooltip");
 	assert.equal(tree.props.label, mod.en.hint);
 	assert.equal(tree.props.side, "top", "tooltip opens upward from the composer");
@@ -395,7 +523,7 @@ test("composer button: hidden in subagent sessions", () => {
 });
 
 test("PR link: shown left of the button, opens the PR in a new browser window", () => {
-	const { tree, link } = renderAction({ status: { "/repo": { pr: PR, at: 0 } } });
+	const { tree, link } = renderAction({ status: { s1: { pr: PR, at: 0 } } });
 	assert.equal(link.type, mod.PrLink);
 	const rendered = mod.PrLink({ ...link.props });
 	assert.equal(rendered.type, "Tooltip");
@@ -412,14 +540,14 @@ test("PR link: shown left of the button, opens the PR in a new browser window", 
 });
 
 test("PR link: merged PR still links, button goes back to Create PR", () => {
-	const { tree, link } = renderAction({ status: { "/repo": { pr: { ...PR, state: "merged" }, at: 0 } } });
+	const { tree, link } = renderAction({ status: { s1: { pr: { ...PR, state: "merged" }, at: 0 } } });
 	assert.equal(link.props.pr.state, "merged");
 	const label = tree.children[0].children.find((c) => c.props?.className === "dsh-create-pr-label");
 	assert.deepEqual(label.children, [mod.en.button]);
 });
 
-test("PR link: another folder's PR is not shown", () => {
-	const { link } = renderAction({ status: { "/other": { pr: PR, at: 0 } } });
+test("PR link: another session's PR is not shown", () => {
+	const { link } = renderAction({ status: { s2: { pr: PR, at: 0 } } });
 	assert.equal(link, null);
 });
 
