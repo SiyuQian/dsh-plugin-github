@@ -1,0 +1,52 @@
+{
+  "name": "dsh-plugin-create-pr",
+  "version": "0.1.0",
+  "description": "One-click pull requests in DeepSeek Harness: a Create PR button in the session header that runs the devpilot pr-creator skill.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "vendor",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "scripts": {
+    "test": "node --test test.mjs",
+    "sync-devpilot": "sh scripts/sync-devpilot.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SiyuQian/dsh-plugin-create-pr.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "pull-request",
+    "devpilot"
+  ]
+}
