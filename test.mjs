@@ -12,8 +12,9 @@ import {
 } from "./lib/index.js";
 
 let mod;
-const stubPrimitives = { Button: "Button", Tooltip: "Tooltip", IconBranchOutlineRegular: "Icon" };
-globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory((n) => ({ react: { createElement: (...a) => a }, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[n] ?? null); } } };
+const stubPrimitives = { Tooltip: "Tooltip", IconBranchOutlineRegular: "Icon" };
+const stubReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: (v) => [v, () => {}] };
+globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory((n) => ({ react: stubReact, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[n] ?? null); } } };
 new Function(readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"))();
 
 // --- skill provider ---------------------------------------------------------
@@ -217,19 +218,60 @@ test("an unreachable preflight does not block the PR", async () => {
 	assert.equal(sent.length, 1);
 });
 
-test("client apply puts the button in the session header actions slot", () => {
+test("client apply puts the button in the composer, left of the model selector", () => {
 	const registered = [];
 	const ctx = {
 		effect: (fn) => fn(),
 		locale: { register: () => () => {}, bind: () => t },
-		slots: { inject: (name, fn) => { assert.equal(name, "conversation.session.header.actions"); fn(); }, register: (opts, component) => registered.push([opts, component]) }
+		slots: { inject: (name, fn) => { assert.equal(name, "conversation.input.right"); fn(); }, register: (opts, component) => registered.push([opts, component]) }
 	};
 	mod.apply(ctx);
 	assert.equal(registered.length, 1);
 	const [opts, component] = registered[0];
-	assert.equal(opts.name, "conversation.session.header.actions");
+	assert.equal(opts.name, mod.SLOT);
 	assert.equal(opts.id, "create-pr");
 	assert.equal(opts.locale, "createPr");
 	assert.equal(typeof opts.inject().run, "function");
-	assert.equal(typeof component, "function");
+	assert.equal(component, mod.CreatePrAction);
+});
+
+function renderAction({ running = false, origin = "user" } = {}) {
+	const runs = [];
+	const tree = mod.CreatePrAction({
+		sessionId: "s1",
+		useSession: (select) => select({ running }),
+		useSessions: (select) => select({ byId: { s1: { origin } } }),
+		run: async (id) => { runs.push(id); },
+		t
+	});
+	return { tree, runs };
+}
+
+test("composer button: idle, labelled, keeps focus, runs for its session", () => {
+	const { tree, runs } = renderAction();
+	assert.equal(tree.type, "Tooltip");
+	assert.equal(tree.props.label, mod.en.hint);
+	assert.equal(tree.props.side, "top", "tooltip opens upward from the composer");
+	const button = tree.children[0];
+	assert.equal(button.type, "button");
+	assert.equal(button.props.className, "dsh-create-pr");
+	assert.equal(button.props.disabled, false);
+	assert.equal(button.props["aria-label"], mod.en.button);
+	let prevented = false;
+	button.props.onMouseDown({ preventDefault: () => { prevented = true; } });
+	assert.ok(prevented, "pressing the button must not steal focus from the composer");
+	const label = button.children.find((c) => c.props?.className === "dsh-create-pr-label");
+	assert.deepEqual(label.children, [mod.en.button]);
+	button.props.onClick();
+	assert.deepEqual(runs, ["s1"]);
+});
+
+test("composer button: disabled with the busy hint while the agent runs", () => {
+	const { tree } = renderAction({ running: true });
+	assert.equal(tree.props.label, mod.en.busy);
+	assert.equal(tree.children[0].props.disabled, true);
+});
+
+test("composer button: hidden in subagent sessions", () => {
+	assert.equal(renderAction({ origin: "subagent" }).tree, null);
 });

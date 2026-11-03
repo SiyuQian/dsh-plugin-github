@@ -1,12 +1,12 @@
 # dsh-plugin-create-pr
 
-A DeepSeek Harness plugin for opening pull requests in one click. It adds a **Create PR** button to the session header. The button hands the work to the devpilot [`pr-creator`](https://github.com/SiyuQian/devpilot-plugin/tree/main/skills/pr-creator) skill.
+A DeepSeek Harness plugin for opening pull requests in one click. It adds a **Create PR** button to the message box, just left of the model selector. The button hands the work to the devpilot [`pr-creator`](https://github.com/SiyuQian/devpilot-plugin/tree/main/skills/pr-creator) skill.
 
 Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may change between releases.
 
 ## What it does
 
-- **Header button.** Clicking **Create PR** first runs a quick, read-only git check on the session folder (local refs only, nothing fetched). If the folder is not a git repo, or the branch has no commits ahead of its base and no uncommitted changes, it shows a notice and sends nothing. Otherwise it sends this prompt to the session:
+- **Composer button.** Clicking **Create PR** first runs a quick, read-only git check on the session folder (local refs only, nothing fetched). If the folder is not a git repo, or the branch has no commits ahead of its base and no uncommitted changes, it shows a notice and sends nothing. Otherwise it sends this prompt to the session:
 
   > /pr-creator Create a pull request for the current branch (or update the existing one).
 
@@ -50,7 +50,7 @@ The skill text itself is unchanged.
 - One click is one prompt. The skill is designed to run without asking for confirmation, so it will create the branch, commit, and push unless it hits one of its documented hard stops.
 - The button prompt is in the UI language (English or Chinese). The skill writes the PR in the language of that prompt unless the repo's convention says otherwise.
 - The preflight only reads local refs. A stale `origin/main` can make it think there is work to PR when there is not; the skill fetches before it decides.
-- Notices appear in the session's composer area. If that is unavailable, the plugin falls back to a native alert.
+- Notices appear above the message box. If that is unavailable, the plugin falls back to a native alert.
 
 ## Test
 
