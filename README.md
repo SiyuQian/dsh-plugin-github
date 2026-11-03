@@ -11,6 +11,9 @@ Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may 
   > /pr-creator Create a pull request for the current branch (or update the existing one).
 
   If the git check fails for any reason, the prompt is still sent; the skill runs its own full preflight.
+- **PR link.** When the session folder's branch has a pull request, a link such as `#191` appears just left of the button, with a dot for its state (green open, grey draft, purple merged, red closed). Hover shows the title. Clicking it opens the PR in your default browser (Chrome on this Mac). While the PR is open or a draft, the button reads **Update PR**.
+
+  The link comes from `gh pr view` (or `glab mr view` for GitLab), using the CLI's own login. It is looked up when the session opens, after each agent turn ends, and when you switch back to the app from another window (at most every 15 seconds). If a lookup fails, the last known link stays on screen.
 - **`pr-creator` skill.** Registered as a bundled skill, so it also works from the `/` menu or when you ask in plain words ("open a PR"). A `pr-creator` skill in your own or a project's skill folder takes precedence over this one.
 
 The skill does the actual work: it reads the diff against `origin/<default branch>`, creates a branch if you are on `main`, commits relevant changes, pushes, fills in the repo's PR template (or one of its own), and creates or updates the PR with `gh` or `glab`. For user-visible frontend changes, it also handles screenshots. See the vendored [SKILL.md](vendor/devpilot/skills/pr-creator/SKILL.md) for the full rules, including when it stops and asks.
@@ -50,6 +53,7 @@ The skill text itself is unchanged.
 - One click is one prompt. The skill is designed to run without asking for confirmation, so it will create the branch, commit, and push unless it hits one of its documented hard stops.
 - The button prompt is in the UI language (English or Chinese). The skill writes the PR in the language of that prompt unless the repo's convention says otherwise.
 - The preflight only reads local refs. A stale `origin/main` can make it think there is work to PR when there is not; the skill fetches before it decides.
+- Only `https` PR links are shown, and only for the folder's current branch. Looking up the link adds one `gh` call (about a second, in the background) at the end of every agent turn.
 - Notices appear above the message box. If that is unavailable, the plugin falls back to a native alert.
 
 ## Test
