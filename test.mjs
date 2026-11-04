@@ -7,9 +7,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	PREFLIGHT_METHOD, PROVIDER_NAME, SKILL_DIR, SKILL_NAME, STATUS_METHOD,
+	PREFLIGHT_METHOD, PROVIDER_NAME, SKILL_DIR, SKILL_NAME,
 	INBOX_METHOD, INBOX_QUERIES, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
-	parseSkill, prByUrl, preflight, preflightRoute, prStatus, prTitle, sessionStatusRoute, statusRoute
+	parseSkill, prByUrl, preflight, preflightRoute, prTitle, sessionStatusRoute
 } from "./lib/index.js";
 
 let mod;
@@ -160,7 +160,6 @@ test("host apply registers the provider, the routes, and the session listeners",
 	assert.deepEqual(seen, [
 		["provider", PROVIDER_NAME],
 		["route", `/api/${PREFLIGHT_METHOD}`],
-		["route", `/api/${STATUS_METHOD}`],
 		["route", `/api/${INBOX_METHOD}`],
 		["route", `/api/${SESSION_STATUS_METHOD}`],
 		["on", "session/event"],
@@ -299,7 +298,9 @@ function fakeCli(answers) {
 const ok = (value) => ({ ok: true, missing: false, out: typeof value === "string" ? value : JSON.stringify(value), err: "" });
 const fail = { ok: false, missing: false, out: "", err: "no pull requests found" };
 
-test("prStatus: GitHub open, draft, merged, closed", async () => {
+const P7 = "https://github.com/o/r/pull/7";
+
+test("prByUrl: GitHub open, draft, merged, closed", async () => {
 	const cases = [
 		[{ state: "OPEN", isDraft: false }, "open"],
 		[{ state: "OPEN", isDraft: true }, "draft"],
@@ -307,38 +308,36 @@ test("prStatus: GitHub open, draft, merged, closed", async () => {
 		[{ state: "CLOSED", isDraft: true }, "closed"]
 	];
 	for (const [extra, want] of cases) {
-		const { run, calls } = fakeCli({ git: ok("git@github.com:o/r.git"), gh: ok({ number: 7, url: "https://github.com/o/r/pull/7", title: "feat: x", ...extra }) });
-		const r = await prStatus("/repo", run);
-		assert.deepEqual(r, { pr: { number: 7, url: "https://github.com/o/r/pull/7", state: want, title: "feat: x" } });
-		assert.deepEqual(calls[1], ["gh", "pr", "view", "--json", "number,url,state,isDraft,title"]);
+		const { run, calls } = fakeCli({ gh: ok({ number: 7, url: P7, title: "feat: x", ...extra }) });
+		assert.deepEqual(await prByUrl(P7, "/ws", run), { pr: { number: 7, url: P7, state: want, title: "feat: x" } });
+		assert.deepEqual(calls[0], ["gh", "pr", "view", P7, "--json", "number,url,state,isDraft,title"]);
 	}
 });
 
-test("prStatus: no PR, gh missing, no remote, other host", async () => {
-	assert.deepEqual(await prStatus("/repo", fakeCli({ git: ok("https://github.com/o/r"), gh: fail }).run), { pr: null, reason: "none" });
-	assert.deepEqual(await prStatus("/repo", fakeCli({ git: ok("https://github.com/o/r") }).run), { pr: null, reason: "gh-missing" });
-	assert.deepEqual(await prStatus("/repo", fakeCli({ git: fail }).run), { pr: null, reason: "no-remote" });
-	assert.deepEqual(await prStatus("/repo", fakeCli({ git: ok("https://bitbucket.org/o/r") }).run), { pr: null, reason: "unsupported-host" });
+test("prByUrl: not found, gh missing, other host", async () => {
+	assert.deepEqual(await prByUrl(P7, "/ws", fakeCli({ gh: fail }).run), { pr: null, reason: "none" });
+	assert.deepEqual(await prByUrl(P7, "/ws", fakeCli({}).run), { pr: null, reason: "gh-missing" });
+	assert.deepEqual(await prByUrl("https://bitbucket.org/o/r/pull-requests/1", "/ws", fakeCli({}).run), { pr: null, reason: "unsupported-host" });
 });
 
-test("prStatus: GitLab MR via glab", async () => {
-	const { run, calls } = fakeCli({ git: ok("git@gitlab.com:o/r.git"), glab: ok({ iid: 12, web_url: "https://gitlab.com/o/r/-/merge_requests/12", state: "opened", draft: true, title: "Draft: y" }) });
-	assert.deepEqual(await prStatus("/repo", run), { pr: { number: 12, url: "https://gitlab.com/o/r/-/merge_requests/12", state: "draft", title: "Draft: y" } });
-	assert.deepEqual(calls[1], ["glab", "mr", "view", "-F", "json"]);
-});
-
-test("prStatus never passes a non-https URL to the page", async () => {
+test("prByUrl never passes a non-https URL to the page", async () => {
 	for (const url of ["javascript:alert(1)", "file:///etc/passwd", "http://github.com/o/r/pull/1", "https://user:pw@github.com/o/r/pull/1"]) {
-		const { run } = fakeCli({ git: ok("https://github.com/o/r"), gh: ok({ number: 1, url, state: "OPEN", isDraft: false, title: "t" }) });
-		assert.deepEqual(await prStatus("/repo", run), { pr: null, reason: "bad-output" }, url);
+		const { run } = fakeCli({ gh: ok({ number: 1, url, state: "OPEN", isDraft: false, title: "t" }) });
+		assert.deepEqual(await prByUrl(P7, "/ws", run), { pr: null, reason: "bad-output" }, url);
 	}
 });
 
-test("status route wraps prStatus in the RPC envelope", async () => {
-	const route = statusRoute(fakeCli({ git: ok("https://github.com/o/r"), gh: fail }).run);
-	assert.equal(route.path, `/api/${STATUS_METHOD}`);
-	const res = await (await route.fetch(new Request("http://x" + route.path, { method: "POST", body: JSON.stringify({ rpcId: "s1", method: STATUS_METHOD, payload: { cwd: "/repo" } }) }))).json();
-	assert.deepEqual(res, { type: "server-response", rpcId: "s1", result: { ok: true, value: { pr: null, reason: "none" } } });
+test("a new session never shows the PR of the folder's current branch", async () => {
+	// The bug: a fresh session in a checkout left on a merged branch showed that branch's PR (#150).
+	const calls = [];
+	const ctx = {
+		get: (n) => ({
+			connection: { rpc: { call: async (ch, method, payload) => { calls.push([method, payload]); return { ok: true, value: { pr: null, reason: "unlinked" } }; } } },
+			sessions: { list: { getSnapshot: () => ({ byId: { s1: { cwd: "/repo/on/old/branch" } } }) } }
+		})[n]
+	};
+	assert.equal(await mod.fetchPrStatus(ctx, "s1"), null);
+	assert.deepEqual(calls, [[SESSION_STATUS_METHOD, { sessionId: "s1" }]], "only the session's own link is asked for");
 });
 
 test("status store: caches by key, skips fresh entries, keeps last link on failure", async () => {

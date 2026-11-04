@@ -36,7 +36,7 @@ The list loads when you open the tab, at most once a minute, and the refresh but
   - you paste a PR link into your message (for example, `https://github.com/.../pull/191 improve the docs`), or
   - the agent runs `gh pr create` (or `glab mr create`) and it prints the new PR's URL.
 
-  The latest of these wins. A PR the agent only views, edits, or mentions does not link the session. If neither has happened, the link falls back to the PR of the session folder's current branch, without renaming the session.
+  The latest of these wins. A PR the agent only views, edits, or mentions does not link the session. A session with neither shows no PR link, even if its folder's current branch has a PR: a new session in a checkout left on an old branch should not inherit that branch's (often merged) PR.
 
   A title you set yourself (double-click to rename) is never overwritten. Subagent sessions are never renamed.
 
