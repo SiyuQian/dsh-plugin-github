@@ -1022,24 +1022,32 @@ test("review tab rows: 中文解读 and 审查 buttons; click starts the right m
 	assert.ok(page !== null);
 });
 
-test("review tab rows: preparing disables both; an active session turns them into 打开会话", () => {
+test("review tab rows: preparing shows one busy button; a PR with a session links back to it", () => {
 	const prep = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: "review", active: null, onStart: () => {}, onOpen: () => {}, error: null });
 	const pb = find(prep, (n) => n.type === "button");
-	assert.ok(pb.every((b) => b.props.disabled === true));
-	assert.match(textOfTree(prep), /Preparing code/);
+	assert.equal(pb.length, 1, "only the clicked action stays, as a spinner");
+	assert.equal(pb[0].props.disabled, true);
+	assert.match(textOfTree(prep), /Preparing…/);
+	assert.equal(find(prep, (n) => n.props?.className === "dsh-gh-item")[0].props["data-busy"], "", "busy rows keep their actions visible without hover");
 	const opened = [];
-	const act = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: { sessionId: "s9" }, onStart: () => assert.fail("must not start"), onOpen: (w) => opened.push(w.sessionId), error: null });
+	const act = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: { sessionId: "s9", mode: "review" }, onStart: () => assert.fail("must not start"), onOpen: (w) => opened.push(w.sessionId), error: null });
 	const ab = find(act, (n) => n.type === "button");
-	assert.deepEqual(ab.map((b) => textOfTree(b)), ["Open session"]);
+	assert.deepEqual(ab.map((b) => textOfTree(b)), ["Reviewing"]);
+	assert.equal(ab[0].props.className, "dsh-gh-session");
 	ab[0].props.onClick();
 	assert.deepEqual(opened, ["s9"]);
+	const explained = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: { sessionId: "s8", mode: "explain" }, onStart: () => {}, onOpen: () => {}, error: null });
+	assert.deepEqual(find(explained, (n) => n.type === "button").map((b) => textOfTree(b)), ["Explained"]);
+	const times = find(act, (n) => n.props?.className === "dsh-gh-time");
+	assert.equal(times.length, 1, "the time is rendered once, at the right edge");
 	const err = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: null, onStart: () => {}, onOpen: () => {}, error: "could not clone" });
 	assert.match(textOfTree(err), /Could not start: could not clone/);
 });
 
 test("both page locales still carry every key", () => {
 	assert.deepEqual(Object.keys(mod.pageZh).sort(), Object.keys(mod.pageEn).sort());
-	assert.equal(mod.pageZh["action.explain"], "中文解读");
+	assert.equal(mod.pageZh["action.explain"], "解读");
+	assert.equal(mod.pageZh["action.openReview"], "审查中");
 	assert.equal(mod.pageZh["action.review"], "审查");
 	assert.equal(mod.pageZh["tab.workspaces"], undefined);
 	assert.equal(mod.WorkspacesView, undefined);
