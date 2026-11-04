@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-github",
-  "version": "0.5.1",
-  "description": "GitHub in DeepSeek Harness: a sidebar tab with your open PRs and review requests, a Create PR button backed by the devpilot pr-creator skill, and PR titles on sessions.",
+  "version": "0.6.0",
+  "description": "GitHub in DeepSeek Harness: a sidebar tab with your open PRs and review requests, one-click Chinese walkthroughs and devpilot pr-review reviews in throwaway checkouts, a Create PR button, and PR titles on sessions.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -12,6 +12,7 @@
   },
   "files": [
     "lib",
+    "skills",
     "vendor",
     "cordis.patch.yml",
     "README.md",
@@ -28,7 +29,8 @@
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-renderer"
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
   },

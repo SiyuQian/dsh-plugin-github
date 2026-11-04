@@ -3,11 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	PREFLIGHT_METHOD, PROVIDER_NAME, SKILL_DIR, SKILL_NAME,
+	PREFLIGHT_METHOD, PROVIDER_NAME, REVIEW_METHODS, SKILL_DIR, SKILL_NAME, VENDOR_ROOT,
 	INBOX_METHOD, INBOX_QUERIES, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
 	parseSkill, prByUrl, preflight, preflightRoute, prTitle, sessionStatusRoute
 } from "./lib/index.js";
@@ -34,28 +34,50 @@ test("folded and inline descriptions both parse", () => {
 	assert.throws(() => parseSkill("no frontmatter"));
 });
 
-test("provider lists one bundled, user- and model-invocable pr-creator", async () => {
+test("provider lists pr-creator, pr-review, and pr-explain as bundled, user- and model-invocable", async () => {
 	const provider = createSkillProvider();
 	assert.equal(provider.name, PROVIDER_NAME);
-	const [candidate, ...rest] = await provider.list();
-	assert.equal(rest.length, 0);
-	assert.equal(candidate.name, SKILL_NAME);
-	assert.equal(candidate.provider, PROVIDER_NAME);
-	assert.deepEqual(candidate.invocation, { modelInvocable: true, userInvocable: true });
-	assert.equal(candidate.rank, 600);
-	assert.equal(candidate.resourceBase.kind, "directory");
-	assert.ok(candidate.path.endsWith("SKILL.md"));
+	const candidates = await provider.list();
+	assert.deepEqual(candidates.map((c) => c.name), ["pr-creator", "pr-review", "pr-explain"]);
+	for (const c of candidates) {
+		assert.equal(c.provider, PROVIDER_NAME);
+		assert.deepEqual(c.invocation, { modelInvocable: true, userInvocable: true });
+		assert.equal(c.rank, 600);
+		assert.equal(c.resourceBase.kind, "directory");
+		assert.ok(readFileSync(c.path, "utf8").startsWith("---"), c.path);
+		assert.ok(c.description.length > 40, `${c.name} has a real description`);
+	}
+	assert.equal(candidates[0].name, SKILL_NAME);
 });
 
-test("loaded body starts with the host note and resolves <devpilot> to a real path", async () => {
+test("devpilot skills load with the host note; DEVPILOT_PLUGIN_ROOT points at a complete install", async () => {
 	const provider = createSkillProvider();
-	const [candidate] = await provider.list();
-	const skill = await provider.get(candidate, { signal: new AbortController().signal });
-	assert.equal(skill.rank, undefined, "rank is a candidate-only field");
-	assert.match(skill.content, /^## DeepSeek Harness notes/);
-	const checker = /The checker is `([^`]+)`/.exec(skill.content)[1];
-	assert.ok(readFileSync(checker, "utf8").startsWith("#!/usr/bin/env python3"));
-	assert.match(skill.content, /# Pull Request \/ Merge Request Skill/);
+	const byName = Object.fromEntries((await provider.list()).map((c) => [c.name, c]));
+	const creator = await provider.get(byName["pr-creator"], { signal: new AbortController().signal });
+	assert.equal(creator.rank, undefined, "rank is a candidate-only field");
+	assert.match(creator.content, /^## DeepSeek Harness notes/);
+	assert.match(creator.content, /# Pull Request \/ Merge Request Skill/);
+	const root = /prefix the command with `DEVPILOT_PLUGIN_ROOT=([^`]+)`/.exec(creator.content)[1];
+	assert.equal(root, VENDOR_ROOT);
+	// devpilot's own resolver accepts the vendored copy and finds what pr-review needs.
+	for (const [args, tail] of [[["scripts/codegraph.sh"], "scripts/codegraph.sh"], [["--skill", "babysit-prs", "scripts/risk.py"], "babysit-prs/scripts/risk.py"], [["--skill", "pr-review", "scripts/check-review.py"], "pr-review/scripts/check-review.py"]]) {
+		const out = execFileSync("python3", [join(root, "scripts/resolve-installed-resource.py"), ...args], { encoding: "utf8", env: { ...process.env, DEVPILOT_PLUGIN_ROOT: root } }).trim();
+		assert.ok(out.endsWith(tail), out);
+	}
+	const review = await provider.get(byName["pr-review"], { signal: new AbortController().signal });
+	assert.match(review.content, /Run the capability selector with `--safe-mutation` only/);
+	assert.match(review.content, /# PR Review/);
+	const explain = await provider.get(byName["pr-explain"], { signal: new AbortController().signal });
+	assert.doesNotMatch(explain.content, /DeepSeek Harness notes/, "our own skill needs no devpilot note");
+	assert.match(explain.content, /read-only/i);
+	assert.match(explain.content, /## PR 中文解读/);
+});
+
+test("capability selector: the flags the note prescribes give degraded, not unsupported", () => {
+	const out = JSON.parse(execFileSync("python3", [join(VENDOR_ROOT, "scripts/select-capability.py"), "pr-review", "--safe-mutation"], { encoding: "utf8" }));
+	assert.equal(out.level, "degraded");
+	assert.equal(out.supported, true);
+	assert.equal(out.stop_before_mutation, false);
 });
 
 test("the relative links the skill follows exist in the vendored copy", () => {
@@ -156,15 +178,28 @@ test("host apply registers the provider, the routes, and the session listeners",
 		effect: (fn) => fn(),
 		on: (event) => seen.push(["on", event])
 	};
-	apply({ inject: (_deps, cb) => cb(scope) });
+	const realSetTimeout = globalThis.setTimeout;
+	const realSetInterval = globalThis.setInterval;
+	const timers = [];
+	globalThis.setTimeout = (fn, ms) => { timers.push(["timeout", ms]); return { unref() {} }; };
+	globalThis.setInterval = (fn, ms) => { timers.push(["interval", ms]); return { unref() {} }; };
+	try {
+		apply({ inject: (_deps, cb) => cb(scope) });
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+		globalThis.setInterval = realSetInterval;
+	}
 	assert.deepEqual(seen, [
 		["provider", PROVIDER_NAME],
 		["route", `/api/${PREFLIGHT_METHOD}`],
 		["route", `/api/${INBOX_METHOD}`],
+		...Object.values(REVIEW_METHODS).map((m) => ["route", `/api/${m}`]),
+		["on", "session/event"],
 		["route", `/api/${SESSION_STATUS_METHOD}`],
 		["on", "session/event"],
 		["on", "session/created"]
 	]);
+	assert.deepEqual(timers, [["timeout", 30000], ["interval", 6 * 60 * 60 * 1000]], "recycling runs shortly after start, then every six hours");
 });
 
 // --- session link and title -------------------------------------------------
@@ -680,7 +715,7 @@ test("GitHub page: owner chips, most PRs first, with counts", () => {
 test("GitHub page: tabs show both totals; refresh forces a reload", () => {
 	const { tree, loads } = renderPage({ status: "ready", data: DATA, error: null });
 	const tabs = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-tab");
-	assert.deepEqual(tabs.map((b) => textOfTree(b)), ["My PRs 137", "Review requested 1"]);
+	assert.deepEqual(tabs.map((b) => textOfTree(b)), ["My PRs 137", "Review requested 1", "Review workspaces"]);
 	assert.equal(tabs[0].props["aria-pressed"], true);
 	const refresh = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-iconbtn")[0];
 	refresh.props.onClick();
@@ -730,4 +765,311 @@ test("ago: short relative times", () => {
 	assert.equal(mod.ago("2026-11-03T12:00:00Z", pt, now), "24h ago");
 	assert.equal(mod.ago("2026-10-30T12:00:00Z", pt, now), "5d ago");
 	assert.deepEqual(Object.keys(mod.pageZh).sort(), Object.keys(mod.pageEn).sort());
+});
+
+// --- review workspaces (host) ---------------------------------------------------
+
+import { assertInside, createReviewWorkspaces, parsePrUrl, reviewPrompt } from "./lib/review.js";
+
+test("parsePrUrl: only plain https PR URLs with safe owner and repo names", () => {
+	assert.deepEqual(parsePrUrl("https://github.com/example-org/web-app/pull/193"), { host: "github.com", owner: "example-org", repo: "web-app", number: 193, url: "https://github.com/example-org/web-app/pull/193" });
+	assert.equal(parsePrUrl("https://github.com/o/r/pull/7/").number, 7);
+	for (const bad of ["http://github.com/o/r/pull/1", "https://u:p@github.com/o/r/pull/1", "https://github.com/../r/pull/1", "https://github.com/o/..git/pull/1", "https://github.com/o/r/issues/1", "https://github.com/o/r/pull/1/files", "not a url"]) {
+		assert.equal(parsePrUrl(bad), null, bad);
+	}
+});
+
+test("assertInside: deletes are confined to the review root", () => {
+	assert.doesNotThrow(() => assertInside("/r", "/r/wt/o/r/pr-1"));
+	for (const bad of ["/r", "/", "/r/../etc", "/elsewhere", "/rx/wt"]) assert.throws(() => assertInside("/r", bad), bad);
+});
+
+/** A workspace pool with fake git/gh: records commands, makes folders, never touches the network. */
+async function fakePool({ clock = { now: new Date("2026-11-04T01:00:00Z") }, ...rest } = {}) {
+	const { mkdtempSync, mkdirSync, writeFileSync: write } = await import("node:fs");
+	const root = mkdtempSync(join(tmpdir(), "gh-review-unit-"));
+	const calls = [];
+	const exec = async (file, args) => {
+		calls.push([file, ...args]);
+		if (file === "gh" && args[0] === "pr") return { ok: true, out: JSON.stringify({ headRefOid: "abc123", title: "ABC-242: push token", baseRefName: "next" }), err: "" };
+		if (file === "gh" && args[0] === "repo") { const dir = args[3]; mkdirSync(dir, { recursive: true }); write(join(dir, "HEAD"), "ref: refs/heads/next\n"); return { ok: true, out: "", err: "" }; }
+		if (file === "git" && args.includes("worktree") && args.includes("add")) { mkdirSync(args[args.length - 2], { recursive: true }); return { ok: true, out: "", err: "" }; }
+		if (file === "git" && args.includes("rev-parse")) return { ok: true, out: "abc123def456", err: "" };
+		if (file === "du") return { ok: true, out: "2048\t/x", err: "" };
+		return { ok: true, out: "", err: "" };
+	};
+	const pool = createReviewWorkspaces({ root, exec, now: () => clock.now, ...rest });
+	return { root, calls, pool, clock, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test("prepare: shared clone once, a new detached worktree per click, registry entry", async () => {
+	const { root, calls, pool, clock, cleanup } = await fakePool();
+	try {
+		const a = await pool.prepare("https://github.com/example-org/web-app/pull/193", "review");
+		clock.now = new Date("2026-11-04T01:01:00Z");
+		const b = await pool.prepare("https://github.com/example-org/web-app/pull/193", "explain");
+		assert.notEqual(a.path, b.path, "never reuses a folder");
+		assert.ok(a.path.startsWith(join(root, "wt", "example-org", "web-app", "pr-193-")));
+		assert.equal(calls.filter((c) => c[0] === "gh" && c[1] === "repo").length, 1, "one clone per repository");
+		const clone = calls.find((c) => c[0] === "gh" && c[1] === "repo");
+		assert.deepEqual(clone.slice(-3), ["--bare", "--filter=blob:none", "--quiet"]);
+		const fetch = calls.find((c) => c.includes("fetch") && c.some((x) => String(x).includes("refs/pull/193/head")));
+		assert.ok(fetch.includes("+refs/heads/next:refs/remotes/origin/next"), "base lands at origin/<base>");
+		assert.ok(calls.some((c) => c.includes("worktree") && c.includes("--detach")));
+		assert.equal(a.mode, "review");
+		assert.equal(a.base, "next");
+		assert.equal(a.sessionId, null);
+		assert.equal((await pool.load()).workspaces.length, 2);
+		await assert.rejects(pool.prepare("https://example.com/x", "review"), /not a GitHub pull request URL/);
+		await assert.rejects(pool.prepare("https://github.com/o/r/pull/1", "merge"), /unknown mode/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("recycling: archived, deleted, expired, unbound; never a running session; shared clone dropped last", async () => {
+	const archived = new Set();
+	const deleted = new Set();
+	const running = new Set();
+	const { root, pool, clock, cleanup } = await fakePool({
+		isArchived: (id) => archived.has(id),
+		sessionExists: (id) => !deleted.has(id),
+		sessionState: (id) => ({ live: true, running: running.has(id) })
+	});
+	try {
+		const url = "https://github.com/example-org/web-app/pull/193";
+		const mk = async (sid, minutes) => {
+			clock.now = new Date(Date.parse("2026-11-04T01:00:00Z") + minutes * 60000);
+			const w = await pool.prepare(url, "review");
+			if (sid) await pool.bind(w.path, sid);
+			return w;
+		};
+		const wa = await mk("A", 0); // archived and running: kept until it stops
+		const wb = await mk("B", 1); // deleted
+		const wc = await mk("C", 2); // idle, recent: kept
+		const wu = await mk(null, 3); // never bound
+		archived.add("A"); running.add("A"); deleted.add("B");
+		clock.now = new Date("2026-11-04T03:00:00Z");
+		let r = await pool.sweep();
+		assert.deepEqual(r.removed.map((x) => x.reason).sort(), ["deleted", "unbound"]);
+		assert.ok(existsSync(wa.path) && existsSync(wc.path));
+		assert.ok(!existsSync(wb.path) && !existsSync(wu.path));
+		running.delete("A");
+		clock.now = new Date("2026-11-20T00:00:00Z");
+		r = await pool.sweep();
+		assert.deepEqual(r.removed.map((x) => x.reason).sort(), ["archived", "expired"]);
+		assert.equal((await pool.load()).workspaces.length, 0);
+		assert.ok(!existsSync(join(root, "repos", "example-org", "web-app.git")), "no workspace left, so the clone goes too");
+	} finally {
+		cleanup();
+	}
+});
+
+test("recycling: keeps at most maxWorkspaces, oldest idle first; manual remove skips running unless forced", async () => {
+	const running = new Set();
+	const { pool, clock, cleanup } = await fakePool({ limits: { maxAgeDays: 30, maxWorkspaces: 2 }, sessionState: (id) => ({ live: true, running: running.has(id) }) });
+	try {
+		const ws = [];
+		for (let i = 0; i < 4; i++) {
+			clock.now = new Date(Date.parse("2026-11-04T01:00:00Z") + i * 60000);
+			const w = await pool.prepare(`https://github.com/o/r/pull/${10 + i}`, "explain");
+			await pool.bind(w.path, `s${i}`);
+			ws.push(w);
+		}
+		running.add("s0");
+		const r = await pool.sweep();
+		assert.deepEqual(r.removed.map((x) => x.reason), ["over-limit"], "the running oldest one stays; the next oldest goes");
+		const left = (await pool.load()).workspaces.map((w) => w.number).sort();
+		assert.deepEqual(left, [10, 12, 13]);
+		const skipped = await pool.remove([ws[0].id]);
+		assert.deepEqual(skipped.removed, []);
+		const forced = await pool.remove([ws[0].id], { force: true });
+		assert.deepEqual(forced.removed, [ws[0].id]);
+	} finally {
+		cleanup();
+	}
+});
+
+test("list: reports size, running, archived and why each would be recycled", async () => {
+	const { pool, clock, cleanup } = await fakePool({ isArchived: (id) => id === "gone", sessionState: (id) => ({ live: true, running: id === "busy" }) });
+	try {
+		const a = await pool.prepare("https://github.com/o/r/pull/1", "review");
+		await pool.bind(a.path, "busy");
+		clock.now = new Date("2026-11-04T01:00:01Z");
+		const b = await pool.prepare("https://github.com/o/r/pull/2", "explain");
+		await pool.bind(b.path, "gone");
+		const l = await pool.list();
+		const byNum = Object.fromEntries(l.workspaces.map((w) => [w.number, w]));
+		assert.equal(byNum[1].running, true);
+		assert.equal(byNum[1].recycle, null);
+		assert.equal(byNum[2].archived, true);
+		assert.equal(byNum[2].recycle, "archived");
+		assert.equal(byNum[1].size, 2048 * 1024);
+		assert.ok(l.root.length > 0 && l.limits.maxAgeDays === 7);
+	} finally {
+		cleanup();
+	}
+});
+
+
+test("review prompt: both skill tokens, checkout path, post to GitHub, Chinese summary", () => {
+	const entry = { url: "https://github.com/o/r/pull/193", number: 193, path: "/x/wt/o/r/pr-193", head: "3b7fbd6a4e39c5b0", base: "next" };
+	const review = reviewPrompt(entry, "review");
+	assert.match(review, /^\/pr-explain \/pr-review https:\/\/github\.com\/o\/r\/pull\/193\n/);
+	assert.match(review, /发布到 GitHub/);
+	assert.match(review, /评审语言跟随 PR 本身的语言/);
+	assert.match(review, /\/x\/wt\/o\/r\/pr-193/);
+	assert.match(review, /origin\/next/);
+	assert.match(review, /用中文总结/);
+	const explain = reviewPrompt(entry, "explain");
+	assert.match(explain, /^\/pr-explain https:/);
+	assert.doesNotMatch(explain, /\/pr-review/);
+	assert.match(explain, /不要在 GitHub 上发布/);
+	// The host's skill gesture regex picks up both tokens on the first line.
+	const gesture = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g;
+	assert.deepEqual([...review.matchAll(gesture)].map((m) => m[2]), ["pr-explain", "pr-review"]);
+});
+
+// --- review actions (client) ----------------------------------------------------
+
+test("startReview: prepare, create session in the checkout, bind, name, open, then send", async () => {
+	const steps = [];
+	const conversation = { send: async (text) => steps.push(["send", text.split("\n")[0]]) };
+	let opened = false;
+	const ctx = {
+		get: (n) => ({
+			connection: { rpc: { call: async (_ch, method, payload) => {
+				steps.push([method, payload]);
+				if (method === "github.review.prepare") return { ok: true, value: { workspace: { path: "/ws/pr-193" }, prompt: "/pr-explain /pr-review https://x/pull/193\n..." } };
+				return { ok: true, value: {} };
+			} } },
+			sessions: {
+				create: async (opts) => { steps.push(["create", opts]); return "s-new"; },
+				using: async (id, _o, fn) => fn({ binding: { session: { rename: async (title) => steps.push(["rename", id, title]) } } }),
+				scope: (id) => (opened && id === "s-new" ? { get: (k) => (k === "conversation" ? conversation : undefined) } : undefined)
+			},
+			uiWorkspace: { openSession: (id) => { opened = true; steps.push(["open", id]); } }
+		})[n]
+	};
+	const pr = { url: "https://github.com/o/r/pull/193", number: 193, title: "ABC-242: push token" };
+	const r = await mod.startReview(ctx, pr, "review");
+	assert.equal(r.sessionId, "s-new");
+	assert.deepEqual(steps, [
+		["github.review.prepare", { url: pr.url, mode: "review" }],
+		["create", { cwd: "/ws/pr-193" }],
+		["github.review.bind", { path: "/ws/pr-193", sessionId: "s-new" }],
+		["rename", "s-new", "审查 #193 ABC-242: push token"],
+		["open", "s-new"],
+		["send", "/pr-explain /pr-review https://x/pull/193"]
+	]);
+});
+
+test("startReview: a failed checkout creates no session", async () => {
+	let created = false;
+	const ctx = { get: (n) => ({
+		connection: { rpc: { call: async () => ({ ok: false, error: { message: "could not clone o/r: auth" } }) } },
+		sessions: { create: async () => { created = true; } }
+	})[n] };
+	await assert.rejects(mod.startReview(ctx, { url: "https://github.com/o/r/pull/1", number: 1, title: "t" }, "review"), /could not clone/);
+	assert.equal(created, false);
+});
+
+test("sendWhenReady: waits for the session scope, gives up after the timeout", async () => {
+	let tries = 0;
+	const sent = [];
+	const ctx = { get: () => ({ scope: () => (++tries >= 3 ? { get: () => ({ send: async (x) => sent.push(x) }) } : undefined) }) };
+	await mod.sendWhenReady(ctx, "s", "hello", 10000, async () => {});
+	assert.deepEqual(sent, ["hello"]);
+	const never = { get: () => ({ scope: () => undefined }) };
+	await assert.rejects(mod.sendWhenReady(never, "s", "x", -1, async () => {}), /did not open in time/);
+});
+
+test("activeWorkspace: newest live, unarchived workspace for the PR", () => {
+	const data = { workspaces: [
+		{ url: "u", sessionId: "s2", archived: false, exists: true },
+		{ url: "u", sessionId: "s1", archived: false, exists: true }
+	] };
+	assert.equal(mod.activeWorkspace(data, "u", { s1: {}, s2: {} }).sessionId, "s2");
+	assert.equal(mod.activeWorkspace(data, "u", { s1: {} }).sessionId, "s1", "a session gone from the list is skipped");
+	assert.equal(mod.activeWorkspace({ workspaces: [{ url: "u", sessionId: "s", archived: true, exists: true }] }, "u", { s: {} }), null);
+	assert.equal(mod.activeWorkspace(null, "u"), null);
+});
+
+function renderReviewTab({ review = {}, sessionsById = {}, start = () => {}, openSession = () => {} } = {}) {
+	const r = { status: "ready", data: { workspaces: [] }, error: null, preparing: {}, ...review };
+	const tree = mod.GithubPage({
+		useInbox: (sel) => sel({ status: "ready", data: DATA, error: null }),
+		useReview: (sel) => sel(r),
+		useSessions: (sel) => sel({ byId: sessionsById }),
+		load: () => {}, loadReview: () => {}, start, openSession,
+		t: pt, now: Date.parse("2026-11-04T00:00:30Z")
+	});
+	return tree;
+}
+
+test("review tab rows: 中文解读 and 审查 buttons; click starts the right mode", () => {
+	const page = renderReviewTab();
+	// switch to the review tab via the stub's tab button handler is stateful; render ReviewRow directly instead.
+	const started = [];
+	const row = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: null, onStart: (pr, mode) => started.push([pr.number, mode]), onOpen: () => {}, error: null });
+	const buttons = find(row, (n) => n.type === "button");
+	assert.deepEqual(buttons.map((b) => textOfTree(b)), ["Explain", "Review"]);
+	assert.equal(buttons[1].props["data-primary"], "", "审查 is the primary button");
+	buttons[0].props.onClick();
+	buttons[1].props.onClick();
+	assert.deepEqual(started, [[192, "explain"], [192, "review"]]);
+	assert.equal(find(row, (n) => n.type === "a")[0].props.href, ROWS[0].url, "the row still links to the PR");
+	assert.ok(page !== null);
+});
+
+test("review tab rows: preparing disables both; an active session turns them into 打开会话", () => {
+	const prep = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: "review", active: null, onStart: () => {}, onOpen: () => {}, error: null });
+	const pb = find(prep, (n) => n.type === "button");
+	assert.ok(pb.every((b) => b.props.disabled === true));
+	assert.match(textOfTree(prep), /Preparing code/);
+	const opened = [];
+	const act = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: { sessionId: "s9" }, onStart: () => assert.fail("must not start"), onOpen: (w) => opened.push(w.sessionId), error: null });
+	const ab = find(act, (n) => n.type === "button");
+	assert.deepEqual(ab.map((b) => textOfTree(b)), ["Open session"]);
+	ab[0].props.onClick();
+	assert.deepEqual(opened, ["s9"]);
+	const err = mod.ReviewRow({ pr: ROWS[0], t: pt, now: 0, preparing: undefined, active: null, onStart: () => {}, onOpen: () => {}, error: "could not clone" });
+	assert.match(textOfTree(err), /Could not start: could not clone/);
+});
+
+test("workspaces view: rows, size, running, recycle reason, delete, open, recycle now", () => {
+	const removed = [];
+	const opened = [];
+	let swept = 0;
+	const review = { status: "ready", error: null, preparing: {}, data: { root: "/Users/x/.dsh/github-review", limits: { maxAgeDays: 7, maxWorkspaces: 20 }, workspaces: [
+		{ id: "w1", url: "u1", owner: "example-org", repo: "web-app", number: 193, title: "ABC-242", mode: "review", path: "/p/1", sessionId: "s1", exists: true, running: true, archived: false, recycle: null, size: 22020096, usedAt: "2026-11-04T00:00:00Z" },
+		{ id: "w2", url: "u2", owner: "o", repo: "r", number: 7, title: "B", mode: "explain", path: "/p/2", sessionId: "s2", exists: true, running: false, archived: true, recycle: "archived", size: 1048576, usedAt: "2026-11-03T00:00:00Z" }
+	] } };
+	const view = mod.WorkspacesView({ review, t: pt, now: Date.parse("2026-11-04T00:00:30Z"), sessionsById: { s1: {}, s2: {} }, notice: null,
+		onRemove: (w) => removed.push(w.id), onOpen: (w) => opened.push(w.sessionId), onSweep: () => { swept += 1; } });
+	const text = textOfTree(view);
+	assert.match(text, /\/Users\/x\/\.dsh\/github-review/);
+	assert.match(text, /2 total, 22 MB/);
+	assert.match(text, /#193 ABC-242/);
+	assert.match(text, /Running/);
+	assert.match(text, /Session archived; removed at the next recycle/);
+	const buttons = find(view, (n) => n.type === "button");
+	const del = buttons.filter((b) => textOfTree(b) === "Delete");
+	assert.equal(del[0].props.disabled, true, "a running session's folder cannot be deleted");
+	del[1].props.onClick();
+	buttons.filter((b) => textOfTree(b) === "Open session")[0].props.onClick();
+	buttons.find((b) => textOfTree(b) === "Recycle now").props.onClick();
+	assert.deepEqual(removed, ["w2"]);
+	assert.deepEqual(opened, ["s1"]);
+	assert.equal(swept, 1);
+	assert.equal(mod.formatSize(512), "1 KB");
+	assert.equal(mod.formatSize(5 * 1048576), "5.0 MB");
+	assert.equal(mod.formatSize(null), "?");
+});
+
+test("both page locales still carry every key", () => {
+	assert.deepEqual(Object.keys(mod.pageZh).sort(), Object.keys(mod.pageEn).sort());
+	assert.equal(mod.pageZh["action.explain"], "中文解读");
+	assert.equal(mod.pageZh["action.review"], "审查");
+	assert.equal(mod.pageZh["tab.workspaces"], "审查工作区");
 });
