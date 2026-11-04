@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	PREFLIGHT_METHOD, PROVIDER_NAME, SKILL_DIR, SKILL_NAME, STATUS_METHOD,
-	SESSION_STATUS_METHOD, apply, argumentText, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
+	INBOX_METHOD, INBOX_QUERIES, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
 	parseSkill, prByUrl, preflight, preflightRoute, prStatus, prTitle, sessionStatusRoute, statusRoute
 } from "./lib/index.js";
 
@@ -161,6 +161,7 @@ test("host apply registers the provider, the routes, and the session listeners",
 		["provider", PROVIDER_NAME],
 		["route", `/api/${PREFLIGHT_METHOD}`],
 		["route", `/api/${STATUS_METHOD}`],
+		["route", `/api/${INBOX_METHOD}`],
 		["route", `/api/${SESSION_STATUS_METHOD}`],
 		["on", "session/event"],
 		["on", "session/created"]
@@ -452,11 +453,11 @@ test("client apply puts the button in the composer, left of the model selector",
 	const ctx = {
 		effect: (fn) => fn(),
 		locale: { register: () => () => {}, bind: () => t },
-		slots: { inject: (name, fn) => { assert.equal(name, "conversation.input.right"); fn(); }, register: (opts, component) => registered.push([opts, component]) }
+		slots: { inject: (_name, fn) => { fn(); }, register: (opts, component) => registered.push([opts, component]) }
 	};
 	mod.apply(ctx);
-	assert.equal(registered.length, 1);
-	const [opts, component] = registered[0];
+	assert.deepEqual(registered.map(([o]) => o.name), ["sidebar.panellist", "main", "conversation.input.right"]);
+	const [opts, component] = registered.find(([o]) => o.name === "conversation.input.right");
 	assert.equal(opts.name, mod.SLOT);
 	assert.equal(opts.id, "create-pr");
 	assert.equal(opts.locale, "createPr");
@@ -554,4 +555,180 @@ test("PR link: another session's PR is not shown", () => {
 test("both locales carry every key, including the state names", () => {
 	assert.deepEqual(Object.keys(mod.zh).sort(), Object.keys(mod.en).sort());
 	for (const s of ["open", "draft", "merged", "closed"]) assert.ok(mod.en[`state.${s}`] && mod.zh[`state.${s}`]);
+});
+
+// --- GitHub tab: inbox --------------------------------------------------------
+
+const node = (over = {}) => ({
+	number: 192, title: "ABC-191: Promote", url: "https://github.com/example-org/web-app/pull/192",
+	isDraft: false, state: "OPEN", updatedAt: "2026-11-03T22:18:40Z", headRefName: "feature/x", baseRefName: "next",
+	author: { login: "SiyuQian" }, repository: { nameWithOwner: "example-org/web-app", owner: { login: "example-org" } },
+	reviewDecision: "REVIEW_REQUIRED", commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+	...over
+});
+
+test("inbox row: flattens state, checks, review; drops non-https", () => {
+	assert.deepEqual(inboxRow(node()), {
+		number: 192, title: "ABC-191: Promote", url: "https://github.com/example-org/web-app/pull/192",
+		repo: "example-org/web-app", owner: "example-org", author: "SiyuQian", state: "open",
+		head: "feature/x", base: "next", updatedAt: "2026-11-03T22:18:40Z", checks: "failure", review: "required"
+	});
+	assert.equal(inboxRow(node({ isDraft: true, reviewDecision: null, commits: { nodes: [] } })).state, "draft");
+	assert.equal(inboxRow(node({ reviewDecision: null })).review, null);
+	assert.equal(inboxRow(node({ url: "javascript:alert(1)" })), null);
+	assert.equal(inboxRow({}), null, "a non-PR search hit is skipped");
+});
+
+test("inbox: one gh api graphql call with both searches, parsed into two lists", async () => {
+	const body = { data: { viewer: { login: "SiyuQian" }, mine: { issueCount: 137, nodes: [node(), {}] }, review: { issueCount: 0, nodes: [] } } };
+	const { run, calls } = fakeCli({ gh: ok(body) });
+	const r = await inbox(run, () => new Date("2026-11-04T00:00:00Z"));
+	assert.equal(r.ok, true);
+	assert.equal(r.login, "SiyuQian");
+	assert.equal(r.fetchedAt, "2026-11-04T00:00:00.000Z");
+	assert.equal(r.mine.total, 137);
+	assert.equal(r.mine.items.length, 1);
+	assert.deepEqual(r.review, { total: 0, items: [] });
+	const args = calls[0];
+	assert.deepEqual(args.slice(0, 3), ["gh", "api", "graphql"]);
+	assert.ok(args.includes(`mine=${INBOX_QUERIES.mine}`));
+	assert.ok(args.includes(`review=${INBOX_QUERIES.review}`));
+	assert.match(INBOX_QUERIES.mine, /author:@me/);
+	assert.match(INBOX_QUERIES.review, /review-requested:@me/);
+});
+
+test("inbox: gh missing, not logged in, GraphQL errors", async () => {
+	assert.equal((await inbox(fakeCli({}).run)).reason, "gh-missing");
+	assert.equal((await inbox(fakeCli({ gh: { ok: false, missing: false, out: "", err: "To get started with GitHub CLI, please run:  gh auth login" } }).run)).reason, "gh-auth");
+	const gqlErr = await inbox(fakeCli({ gh: ok({ errors: [{ message: "rate limited" }] }) }).run);
+	assert.deepEqual(gqlErr, { ok: false, reason: "gh-failed", message: "rate limited" });
+});
+
+// --- GitHub tab: page ---------------------------------------------------------
+
+const pt = (key, params = {}) => (mod.pageEn[key] ?? key).replace(/\{(\w+)\}/g, (_, k) => params[k]);
+const ROWS = [
+	{ number: 192, title: "A", url: "https://github.com/example-org/web-app/pull/192", repo: "example-org/web-app", owner: "example-org", author: "SiyuQian", state: "open", updatedAt: "2026-11-04T00:00:00Z", checks: "success", review: null },
+	{ number: 7, title: "B", url: "https://github.com/SiyuQian/travel-plans/pull/7", repo: "SiyuQian/travel-plans", owner: "SiyuQian", author: "SiyuQian", state: "draft", updatedAt: "2026-11-01T00:00:00Z", checks: "failure", review: "changes" },
+	{ number: 191, title: "C", url: "https://github.com/example-org/web-app/pull/191", repo: "example-org/web-app", owner: "example-org", author: "SiyuQian", state: "open", updatedAt: "2026-11-03T00:00:00Z", checks: null, review: null }
+];
+const DATA = { ok: true, login: "SiyuQian", fetchedAt: "2026-11-04T00:00:00Z", mine: { total: 137, items: ROWS }, review: { total: 1, items: [ROWS[0]] } };
+
+/** Walk a stub element tree, rendering function components (PrRow) on the way. */
+function find(tree, pred, out = []) {
+	if (tree === null || typeof tree !== "object") return out;
+	if (Array.isArray(tree)) { tree.forEach((c) => find(c, pred, out)); return out; }
+	if (typeof tree.type === "function") return find(tree.type({ ...tree.props, children: tree.children }), pred, out);
+	if (pred(tree)) out.push(tree);
+	find(tree.children, pred, out);
+	return out;
+}
+const textOfTree = (tree) => find(tree, () => true).flatMap((n) => n.children.filter((c) => typeof c === "string")).join(" ");
+
+function renderPage(state) {
+	const loads = [];
+	const tree = mod.GithubPage({ useInbox: (sel) => sel(state), load: (age) => loads.push(age), t: pt, now: Date.parse("2026-11-04T00:00:30Z") });
+	return { tree, loads };
+}
+
+test("GitHub tab: sidebar entry and main page are registered under one id", () => {
+	const registered = [];
+	mod.apply({
+		effect: (fn) => fn(),
+		locale: { register: () => () => {}, bind: (ns) => (ns === "github" ? pt : t) },
+		slots: { inject: (_n, fn) => fn(), register: (opts, component) => registered.push([opts, component]) }
+	});
+	const [panel, panelIcon] = registered.find(([o]) => o.name === "sidebar.panellist");
+	const [main, page] = registered.find(([o]) => o.name === "main");
+	assert.equal(panel.id, "github");
+	assert.equal(main.key, "github", "the sidebar row opens the main panel with the same id");
+	assert.equal(panel.label(), "GitHub");
+	assert.ok(panel.order > 10, "after 插件 (0) and 自动化任务 (10)");
+	assert.equal(panelIcon, mod.GithubIcon);
+	assert.equal(page, mod.GithubPage);
+	const injected = main.inject();
+	assert.equal(typeof injected.hooks.inbox.getSnapshot, "function", "becomes useInbox");
+	assert.equal(typeof injected.load, "function");
+	assert.equal(mod.GithubIcon({ size: 18 }).props.width, 18);
+});
+
+test("GitHub page: loads on open, shows rows as https links, newest first as given", () => {
+	const { tree, loads } = renderPage({ status: "ready", data: DATA, error: null });
+	assert.deepEqual(loads, [60000], "opening the tab loads unless the list is under a minute old");
+	const links = find(tree, (n) => n.type === "a");
+	assert.deepEqual(links.map((a) => a.props.href), ROWS.map((r) => r.url));
+	for (const a of links) {
+		assert.equal(a.props.target, "_blank");
+		assert.equal(a.props.rel, "noopener noreferrer");
+	}
+	const text = textOfTree(tree);
+	assert.match(text, /example-org\/web-app#192/);
+	assert.match(text, /Draft/);
+	assert.match(text, /Checks failed/);
+	assert.match(text, /Changes requested/);
+	assert.match(text, /Showing the 3 most recently updated of 137/);
+	assert.match(text, /Updated just now · SiyuQian/);
+});
+
+test("GitHub page: owner chips, most PRs first, with counts", () => {
+	const { tree } = renderPage({ status: "ready", data: DATA, error: null });
+	const chips = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-owner");
+	assert.deepEqual(chips.map((c) => c.children.join("")), ["All", "example-org 2", "SiyuQian 1"]);
+	assert.equal(chips[0].props["aria-pressed"], true);
+	assert.deepEqual(mod.ownersOf([ROWS[1]]), [{ owner: "SiyuQian", count: 1 }]);
+});
+
+test("GitHub page: tabs show both totals; refresh forces a reload", () => {
+	const { tree, loads } = renderPage({ status: "ready", data: DATA, error: null });
+	const tabs = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-tab");
+	assert.deepEqual(tabs.map((b) => textOfTree(b)), ["My PRs 137", "Review requested 1"]);
+	assert.equal(tabs[0].props["aria-pressed"], true);
+	const refresh = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-iconbtn")[0];
+	refresh.props.onClick();
+	assert.deepEqual(loads, [60000, 0]);
+});
+
+test("GitHub page: loading, error before any data, error after data keeps the list", () => {
+	assert.match(textOfTree(renderPage({ status: "loading", data: null, error: null }).tree), /Reading from GitHub/);
+	const authErr = renderPage({ status: "error", data: null, error: { reason: "gh-auth", message: "x" } }).tree;
+	assert.match(textOfTree(authErr), /gh is not logged in/);
+	const odd = renderPage({ status: "error", data: null, error: { reason: "weird", message: "boom" } }).tree;
+	assert.match(textOfTree(odd), /Could not read GitHub: boom/, "unknown reasons fall back to a readable message");
+	const stale = renderPage({ status: "error", data: DATA, error: { reason: "gh-failed", message: "timeout" } }).tree;
+	assert.equal(find(stale, (n) => n.type === "a").length, 3, "the last good list stays");
+	assert.match(textOfTree(stale), /Could not read GitHub: timeout/);
+});
+
+test("GitHub page: empty lists", () => {
+	const empty = { ...DATA, mine: { total: 0, items: [] } };
+	assert.match(textOfTree(renderPage({ status: "ready", data: empty, error: null }).tree), /You have no open pull requests/);
+});
+
+test("inbox store: loads once, skips fresh data, keeps data on failure, shares inflight", async () => {
+	let clock = 0;
+	const answers = [DATA, { ok: false, reason: "gh-failed", message: "x" }];
+	let calls = 0;
+	const store = mod.createInboxStore(async () => { calls += 1; return answers.shift(); }, () => clock);
+	await Promise.all([store.load(), store.load()]);
+	assert.equal(calls, 1, "concurrent loads share one request");
+	assert.equal(store.getSnapshot().status, "ready");
+	clock = 30000;
+	await store.load(60000);
+	assert.equal(calls, 1, "fresh list is not reloaded");
+	await store.load(0);
+	assert.equal(calls, 2);
+	assert.equal(store.getSnapshot().status, "error");
+	assert.equal(store.getSnapshot().data, DATA, "the last good list stays");
+	const failing = mod.createInboxStore(async () => { throw new Error("transport"); });
+	await failing.load();
+	assert.deepEqual(failing.getSnapshot().error, { reason: "rpc", message: "transport" });
+});
+
+test("ago: short relative times", () => {
+	const now = Date.parse("2026-11-04T12:00:00Z");
+	assert.equal(mod.ago("2026-11-04T11:59:30Z", pt, now), "just now");
+	assert.equal(mod.ago("2026-11-04T11:15:00Z", pt, now), "45m ago");
+	assert.equal(mod.ago("2026-11-03T12:00:00Z", pt, now), "24h ago");
+	assert.equal(mod.ago("2026-10-30T12:00:00Z", pt, now), "5d ago");
+	assert.deepEqual(Object.keys(mod.pageZh).sort(), Object.keys(mod.pageEn).sort());
 });

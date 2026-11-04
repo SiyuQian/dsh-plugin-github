@@ -1,7 +1,7 @@
 {
-  "name": "dsh-plugin-create-pr",
-  "version": "0.4.0",
-  "description": "One-click pull requests in DeepSeek Harness: a Create PR button in the session header that runs the devpilot pr-creator skill.",
+  "name": "dsh-plugin-github",
+  "version": "0.5.0",
+  "description": "GitHub in DeepSeek Harness: a sidebar tab with your open PRs and review requests, a Create PR button backed by the devpilot pr-creator skill, and PR titles on sessions.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -41,11 +41,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SiyuQian/dsh-plugin-create-pr.git"
+    "url": "git+https://github.com/SiyuQian/dsh-plugin-github.git"
   },
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
+    "github",
     "pull-request",
     "devpilot"
   ]

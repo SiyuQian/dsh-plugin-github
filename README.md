@@ -1,10 +1,28 @@
-# dsh-plugin-create-pr
+# dsh-plugin-github
 
-A DeepSeek Harness plugin for opening pull requests in one click. It adds a **Create PR** button to the message box, just left of the model selector. The button hands the work to the devpilot [`pr-creator`](https://github.com/SiyuQian/devpilot-plugin/tree/main/skills/pr-creator) skill.
+A DeepSeek Harness plugin for working with GitHub. It adds:
 
-Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may change between releases.
+- a **GitHub** tab in the sidebar, beside 插件 and 自动化任务, that lists your open pull requests and the ones waiting for your review;
+- a **Create PR** button in the message box, backed by the devpilot [`pr-creator`](https://github.com/SiyuQian/devpilot-plugin/tree/main/skills/pr-creator) skill;
+- a PR link in the message box, and PR titles on sessions in the sidebar.
+
+Everything reads GitHub through your own `gh` login. Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may change between releases.
 
 ## What it does
+
+### GitHub tab
+
+- **My PRs**: your open pull requests across every repository your `gh` login can see, most recently updated first.
+- **Review requested**: open pull requests where someone asked you to review.
+
+Each row shows the repository and number, draft state, CI checks (passed, failed, running), and review state (approved, changes requested, review required); the review list also shows the author. Clicking a row opens the PR in your default browser. Chips under the tabs filter by owner (for example `example-org`, `octocat`), sorted by how many PRs each has.
+
+The list loads when you open the tab, at most once a minute, and the refresh button reloads it straight away. Each list shows the 50 most recently updated PRs, and the tab header gives the full count. If a reload fails, the last list stays on screen with the error beside it. The data comes from one `gh api graphql` call with two searches:
+
+- `is:pr is:open author:@me archived:false`
+- `is:pr is:open review-requested:@me archived:false`
+
+### Create PR and the message box
 
 - **Composer button.** Clicking **Create PR** first runs a quick, read-only git check on the session folder (local refs only, nothing fetched). If the folder is not a git repo, or the branch has no commits ahead of its base and no uncommitted changes, it shows a notice and sends nothing. Otherwise it sends this prompt to the session:
 
@@ -31,12 +49,15 @@ The button is disabled while the agent is running and hidden in subagent session
 
 ## Requirements
 
-- `git`, plus `gh` (GitHub) or `glab` (GitLab), logged in with an account that can see the repo.
+- `gh`, logged in (`gh auth login`) with an account that can see your repositories. GitLab MRs work in the message box through `glab`; the GitHub tab is GitHub only.
+- `git`.
 - `python3` for the skill's screenshot checker.
 
 ## Install
 
-In DeepSeek Harness, open **Plugins > Add plugin**. Enter the absolute path of a local checkout, or this repository's Git URL. Restart the app if the button does not appear.
+In DeepSeek Harness, open **Plugins > Add plugin**. Enter the absolute path of a local checkout, or this repository's Git URL. Restart the app if the GitHub tab or the button does not appear.
+
+This repository is private, so installing from the Git URL needs a git login (SSH key or `gh auth login`) with access to it.
 
 ## Updating the skill
 
@@ -65,6 +86,7 @@ The skill text itself is unchanged.
 - Only `https` PR links are shown. Looking up the link adds one `gh` call (about a second, in the background) at the end of every agent turn.
 - The rename goes through DSH's own title service, the same as renaming by hand, so it is recorded as a user title in the session log. Titles are cut at DSH's 80-byte limit.
 - Sessions are renamed only while open in DSH. An old session picks up its PR title the next time you open it.
+- The GitHub tab shows at most 50 PRs per list; the owner chips filter those 50, not every PR on GitHub.
 - Notices appear above the message box. If that is unavailable, the plugin falls back to a native alert.
 
 ## Test

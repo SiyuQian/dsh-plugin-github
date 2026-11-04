@@ -2,5 +2,5 @@
 # preflight route); the client half is discovered from `dsh.client` in
 # package.json.
 - insert:
-    - id: create-pr
-      name: dsh-plugin-create-pr
+    - id: github
+      name: dsh-plugin-github
