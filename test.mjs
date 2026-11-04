@@ -715,7 +715,7 @@ test("GitHub page: owner chips, most PRs first, with counts", () => {
 test("GitHub page: tabs show both totals; refresh forces a reload", () => {
 	const { tree, loads } = renderPage({ status: "ready", data: DATA, error: null });
 	const tabs = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-tab");
-	assert.deepEqual(tabs.map((b) => textOfTree(b)), ["My PRs 137", "Review requested 1", "Review workspaces"]);
+	assert.deepEqual(tabs.map((b) => textOfTree(b)), ["My PRs 137", "Review requested 1"], "no workspaces tab: recycling is automatic");
 	assert.equal(tabs[0].props["aria-pressed"], true);
 	const refresh = find(tree, (n) => n.type === "button" && n.props.className === "dsh-gh-iconbtn")[0];
 	refresh.props.onClick();
@@ -1037,39 +1037,10 @@ test("review tab rows: preparing disables both; an active session turns them int
 	assert.match(textOfTree(err), /Could not start: could not clone/);
 });
 
-test("workspaces view: rows, size, running, recycle reason, delete, open, recycle now", () => {
-	const removed = [];
-	const opened = [];
-	let swept = 0;
-	const review = { status: "ready", error: null, preparing: {}, data: { root: "/Users/x/.dsh/github-review", limits: { maxAgeDays: 7, maxWorkspaces: 20 }, workspaces: [
-		{ id: "w1", url: "u1", owner: "example-org", repo: "web-app", number: 193, title: "ABC-242", mode: "review", path: "/p/1", sessionId: "s1", exists: true, running: true, archived: false, recycle: null, size: 22020096, usedAt: "2026-11-04T00:00:00Z" },
-		{ id: "w2", url: "u2", owner: "o", repo: "r", number: 7, title: "B", mode: "explain", path: "/p/2", sessionId: "s2", exists: true, running: false, archived: true, recycle: "archived", size: 1048576, usedAt: "2026-11-03T00:00:00Z" }
-	] } };
-	const view = mod.WorkspacesView({ review, t: pt, now: Date.parse("2026-11-04T00:00:30Z"), sessionsById: { s1: {}, s2: {} }, notice: null,
-		onRemove: (w) => removed.push(w.id), onOpen: (w) => opened.push(w.sessionId), onSweep: () => { swept += 1; } });
-	const text = textOfTree(view);
-	assert.match(text, /\/Users\/x\/\.dsh\/github-review/);
-	assert.match(text, /2 total, 22 MB/);
-	assert.match(text, /#193 ABC-242/);
-	assert.match(text, /Running/);
-	assert.match(text, /Session archived; removed at the next recycle/);
-	const buttons = find(view, (n) => n.type === "button");
-	const del = buttons.filter((b) => textOfTree(b) === "Delete");
-	assert.equal(del[0].props.disabled, true, "a running session's folder cannot be deleted");
-	del[1].props.onClick();
-	buttons.filter((b) => textOfTree(b) === "Open session")[0].props.onClick();
-	buttons.find((b) => textOfTree(b) === "Recycle now").props.onClick();
-	assert.deepEqual(removed, ["w2"]);
-	assert.deepEqual(opened, ["s1"]);
-	assert.equal(swept, 1);
-	assert.equal(mod.formatSize(512), "1 KB");
-	assert.equal(mod.formatSize(5 * 1048576), "5.0 MB");
-	assert.equal(mod.formatSize(null), "?");
-});
-
 test("both page locales still carry every key", () => {
 	assert.deepEqual(Object.keys(mod.pageZh).sort(), Object.keys(mod.pageEn).sort());
 	assert.equal(mod.pageZh["action.explain"], "中文解读");
 	assert.equal(mod.pageZh["action.review"], "审查");
-	assert.equal(mod.pageZh["tab.workspaces"], "审查工作区");
+	assert.equal(mod.pageZh["tab.workspaces"], undefined);
+	assert.equal(mod.WorkspacesView, undefined);
 });

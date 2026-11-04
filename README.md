@@ -42,16 +42,16 @@ What one click does:
 
 While a PR has a session, its row shows **打开会话** instead, which goes back to that session rather than starting another.
 
-### Review workspaces (审查工作区)
+### Review checkouts and recycling
 
-The third tab lists every review checkout with its PR, mode, size, last use, and session state. A workspace is recycled (its folder deleted) when:
+Each click checks the PR out into its own folder under `~/.dsh/github-review`. Nothing needs managing by hand: a checkout is deleted automatically when
 
 - its session is archived or deleted;
 - it has not been used for 7 days;
 - it was never attached to a session (after an hour; this happens if starting a session failed);
 - there are more than 20, oldest idle first.
 
-A workspace whose session is running is never recycled. Recycling runs 30 seconds after DSH starts, every six hours, and when you click **立即回收**; **删除** removes one at once (not while its session is running). Session history is kept; only the code folder goes. A shared clone is removed once no workspace uses it.
+A checkout whose session is running is never deleted. Recycling runs 30 seconds after DSH starts and then every six hours. Session history is kept; only the code folder goes. A shared clone is removed once no checkout uses it.
 
 ### Create PR and the message box
 
