@@ -8,14 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	PREFLIGHT_METHOD, PROVIDER_NAME, REVIEW_METHODS, SKILL_DIR, SKILL_NAME, VENDOR_ROOT,
-	INBOX_METHOD, INBOX_QUERIES, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
+	INBOX_METHOD, INBOX_QUERIES, LINK_KEY, REPOS_METHOD, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
 	parseSkill, prByUrl, preflight, preflightRoute, prTitle, sessionStatusRoute
 } from "./lib/index.js";
 
 let mod;
-const stubPrimitives = { Tooltip: "Tooltip", IconBranchOutlineRegular: "Icon" };
+const stubPrimitives = { Tooltip: "Tooltip", Menu: "Menu", Modal: "Modal", Button: "Button", Checkbox: "Checkbox", IconBranchOutlineRegular: "Icon", IconRefreshOutlineRegular: "Icon", IconChevronDownOutlineRegular: "Icon" };
 // Effects run synchronously on "render" so tests can see the lookups they trigger.
-const stubReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: (v) => [v, () => {}], useEffect: (fn) => { fn(); } };
+const stubReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: (v) => [typeof v === "function" ? v() : v, () => {}], useEffect: (fn) => { fn(); } };
 globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory((n) => ({ react: stubReact, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[n] ?? null); } } };
 new Function(readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"))();
 
@@ -175,6 +175,7 @@ test("host apply registers the provider, the routes, and the session listeners",
 			connection: { fetch: { register: (route) => seen.push(["route", route.path]) } },
 			sessions: { get: () => undefined }
 		})[n],
+		sessionProjections: { register: (def) => seen.push(["projection", def.key]) },
 		effect: (fn) => fn(),
 		on: (event) => seen.push(["on", event])
 	};
@@ -196,8 +197,10 @@ test("host apply registers the provider, the routes, and the session listeners",
 		...Object.values(REVIEW_METHODS).map((m) => ["route", `/api/${m}`]),
 		["on", "session/event"],
 		["route", `/api/${SESSION_STATUS_METHOD}`],
+		["route", `/api/${REPOS_METHOD}`],
 		["on", "session/event"],
-		["on", "session/created"]
+		["on", "session/created"],
+		["projection", LINK_KEY]
 	]);
 	assert.deepEqual(timers, [["timeout", 30000], ["interval", 6 * 60 * 60 * 1000]], "recycling runs shortly after start, then every six hours");
 });
@@ -268,7 +271,8 @@ test("link manager: looks up the linked PR by URL from any folder and retitles",
 	const { run, calls } = fakeCli({ gh: ok({ number: 191, url: U191, state: "OPEN", isDraft: true, title: "docs: Add harness docs" }) });
 	const links = createLinkManager({ sessions: { get: (id) => (id === "s1" ? session : undefined) }, titles: { rename: (s, t) => { renames.push([s.id, t]); return { title: t }; } }, run });
 	const r = await links.status("s1", 0);
-	assert.deepEqual(r, { pr: { number: 191, url: U191, state: "draft", title: "docs: Add harness docs" } });
+	const one = { number: 191, url: U191, state: "draft", title: "docs: Add harness docs", repo: "example-org/web-app" };
+	assert.deepEqual(r, { pr: one, prs: [one] });
 	assert.deepEqual(calls[0], ["gh", "pr", "view", U191, "--json", "number,url,state,isDraft,title"], "by URL, so a parent workspace folder works");
 	await new Promise((r) => setTimeout(r, 0));
 	assert.deepEqual(renames, [["s1", "#191 docs: Add harness docs"]]);
@@ -287,8 +291,8 @@ test("link manager: cache, unlinked, not live, subagent", async () => {
 	await links.status("s1", 60000);
 	await links.status("s1", 60000);
 	assert.equal(calls.length, 1, "second lookup within maxAge is cached");
-	assert.deepEqual(await links.status("s2"), { pr: null, reason: "unlinked" });
-	assert.deepEqual(await links.status("gone"), { pr: null, reason: "not-live" });
+	assert.deepEqual(await links.status("s2"), { pr: null, prs: [], reason: "unlinked" });
+	assert.deepEqual(await links.status("gone"), { pr: null, prs: [], reason: "not-live" });
 	await links.status("sub", 0);
 	await new Promise((r) => setTimeout(r, 0));
 	assert.deepEqual(renames, ["s1"], "subagent sessions are never retitled");
@@ -371,7 +375,7 @@ test("a new session never shows the PR of the folder's current branch", async ()
 			sessions: { list: { getSnapshot: () => ({ byId: { s1: { cwd: "/repo/on/old/branch" } } }) } }
 		})[n]
 	};
-	assert.equal(await mod.fetchPrStatus(ctx, "s1"), null);
+	assert.deepEqual(await mod.fetchPrStatus(ctx, "s1"), []);
 	assert.deepEqual(calls, [[SESSION_STATUS_METHOD, { sessionId: "s1" }]], "only the session's own link is asked for");
 });
 
@@ -422,13 +426,15 @@ test("status store: concurrent refreshes share one lookup", async () => {
 
 const t = (key, params = {}) => mod.en[key].replace(/\{(\w+)\}/g, (_, k) => params[k]);
 
-function clientCtx({ cwd = "/repo", preflightResult, sent = [], rpcThrows = false }) {
+function clientCtx({ cwd = "/repo", preflightResult, sent = [], rpcThrows = false, repos, calls = [] }) {
 	const conversation = { send: async (text) => { sent.push(text); }, input: { for: () => ({ notify() {} }) } };
 	return {
 		get: (n) => ({
 			connection: { rpc: { call: async (ch, m, payload) => {
+				calls.push([m, payload]);
 				if (rpcThrows) throw new Error("offline");
 				assert.equal(ch, "/api");
+				if (m === REPOS_METHOD) return { ok: true, value: repos };
 				assert.equal(m, PREFLIGHT_METHOD);
 				assert.deepEqual(payload, { cwd });
 				return preflightResult;
@@ -454,9 +460,9 @@ test("both prompts open with the skill token", () => {
 	assert.deepEqual(Object.keys(mod.zh).sort(), Object.keys(mod.en).sort());
 });
 
-test("stops without sending when the folder is not a repo", async () => {
+test("stops without sending when the folder is not a repo and holds none", async () => {
 	const sent = [];
-	const outcome = await mod.createPr(clientCtx({ sent, preflightResult: { ok: true, value: { status: "not-a-repo" } } }), "s1", t);
+	const outcome = await mod.createPr(clientCtx({ sent, preflightResult: { ok: true, value: { status: "not-a-repo" } }, repos: { root: "/repo", repos: [] } }), "s1", t);
 	assert.equal(outcome.kind, "stop");
 	assert.equal(outcome.text, mod.en.notRepo);
 	assert.equal(sent.length, 0);
@@ -490,7 +496,7 @@ test("client apply puts the button in the composer, left of the model selector",
 		slots: { inject: (_name, fn) => { fn(); }, register: (opts, component) => registered.push([opts, component]) }
 	};
 	mod.apply(ctx);
-	assert.deepEqual(registered.map(([o]) => o.name), ["sidebar.panellist", "main", "conversation.input.right"]);
+	assert.deepEqual(registered.map(([o]) => o.name), ["sidebar.panellist", "main", "conversation.input.right", "sidebar.session.row.hover"]);
 	const [opts, component] = registered.find(([o]) => o.name === "conversation.input.right");
 	assert.equal(opts.name, mod.SLOT);
 	assert.equal(opts.id, "create-pr");
@@ -1051,4 +1057,282 @@ test("both page locales still carry every key", () => {
 	assert.equal(mod.pageZh["action.review"], "审查");
 	assert.equal(mod.pageZh["tab.workspaces"], undefined);
 	assert.equal(mod.WorkspacesView, undefined);
+});
+
+// --- several PRs per session ----------------------------------------------------
+
+import { linksOf, linkProjection, repoOf, scanRepos, touchedRepos, childRepos, MAX_LINKED } from "./lib/index.js";
+
+const U176 = "https://github.com/example-org/website/pull/176";
+
+test("links: every linked PR is kept, most recent first; relinking moves it to the front", () => {
+	const create = "gh pr create --fill";
+	const events = [userMsg(U191), call("c", create), result("c", U176), userMsg(`back to ${U191}`)];
+	assert.deepEqual(linksOf(events), [U191, U176]);
+	assert.equal(linkOf(events), U191, "the most recent stays the single link (and the title)");
+	assert.deepEqual(linksOf([userMsg(`${U191} and ${U176}`)]), [U176, U191], "two in one message: the last written is most recent");
+	assert.deepEqual(linksOf([]), []);
+});
+
+test("links: the list is capped, oldest dropped", () => {
+	const events = Array.from({ length: MAX_LINKED + 3 }, (_, i) => userMsg(`https://github.com/o/r/pull/${i + 1}`));
+	const urls = linksOf(events);
+	assert.equal(urls.length, MAX_LINKED);
+	assert.equal(urls[0], `https://github.com/o/r/pull/${MAX_LINKED + 3}`);
+	assert.ok(!urls.includes("https://github.com/o/r/pull/1"));
+});
+
+test("link projection: same state object for unrelated events; view is the URL list; schemas validate", () => {
+	const def = linkProjection();
+	assert.equal(def.key, LINK_KEY);
+	const s0 = def.init();
+	assert.equal(def.apply(s0, { type: "step/start", data: {} }), s0);
+	const s1 = def.apply(s0, userMsg(U191));
+	assert.deepEqual(def.wire.view(s1), [U191]);
+	assert.equal(def.wire.view(s1), def.wire.view(s1), "same array: no republish");
+	assert.equal(def.apply(s1, userMsg(U191)), s1, "relinking the first PR changes nothing");
+	assert.deepEqual(def.stateSchema.parse(s1), s1);
+	assert.throws(() => def.stateSchema.parse({ url: 1 }));
+	assert.throws(() => def.wire.viewSchema.parse([1]));
+	// a state saved by an older build (no `urls`) still folds
+	assert.deepEqual(def.apply({ url: U191, pending: [] }, userMsg(U176)).urls, [U176, U191]);
+});
+
+test("repoOf: owner/repo from GitHub and GitLab URLs", () => {
+	assert.equal(repoOf(U191), "example-org/web-app");
+	assert.equal(repoOf("https://gitlab.com/g/sub/p/-/merge_requests/3"), "g/sub/p");
+	assert.equal(repoOf("nope"), "");
+});
+
+test("link manager: returns every linked PR; the title follows the most recent one", async () => {
+	const session = liveSession("s1", [titleEv("auto", "provider"), userMsg(U191), userMsg(U176)]);
+	const renames = [];
+	const { run } = fakeCli({ gh: (args) => ok(args[2] === U176
+		? { number: 176, url: U176, state: "OPEN", isDraft: false, title: "ABC-49" }
+		: { number: 191, url: U191, state: "MERGED", isDraft: false, title: "docs" }) });
+	const links = createLinkManager({ sessions: new Map([["s1", session]]), titles: { rename: (s, t) => { renames.push(t); return { title: t }; } }, run });
+	const r = await links.status("s1", 0);
+	assert.deepEqual(r.prs.map((p) => [p.number, p.state, p.repo]), [[176, "open", "example-org/website"], [191, "merged", "example-org/web-app"]]);
+	assert.equal(r.pr.number, 176);
+	await new Promise((res) => setTimeout(res, 0));
+	assert.deepEqual(renames, ["#176 ABC-49"]);
+});
+
+test("link manager: a PR that cannot be read is left out; the title is left alone if it was the most recent", async () => {
+	const session = liveSession("s1", [titleEv("auto", "provider"), userMsg(U191), userMsg(U176)]);
+	const renames = [];
+	const { run } = fakeCli({ gh: (args) => (args[2] === U176 ? fail : ok({ number: 191, url: U191, state: "OPEN", isDraft: false, title: "docs" })) });
+	const links = createLinkManager({ sessions: new Map([["s1", session]]), titles: { rename: (s, t) => { renames.push(t); return { title: t }; } }, run });
+	const r = await links.status("s1", 0);
+	assert.deepEqual(r.prs.map((p) => p.number), [191]);
+	await new Promise((res) => setTimeout(res, 0));
+	assert.deepEqual(renames, [], "no rename to an older PR");
+});
+
+// --- multi-repo workspaces --------------------------------------------------------
+
+test("touchedRepos: workdir, absolute path, cd; whole names only", () => {
+	const root = "/ws";
+	const names = ["web-app", "web-app-cache", "api-tool", "iam"];
+	const c = (args) => ({ type: "tool/call", data: { callId: "x", name: "bash", arguments: JSON.stringify(args) } });
+	assert.deepEqual([...touchedRepos([c({ workdir: "api-tool", command: "ls" })], root, names)], ["api-tool"]);
+	assert.deepEqual([...touchedRepos([c({ workdir: "/ws/iam/sub" })], root, names)], ["iam"]);
+	assert.deepEqual([...touchedRepos([c({ command: "cd /ws/iam && git log" })], root, names)], ["iam"]);
+	assert.deepEqual([...touchedRepos([c({ file_path: "/ws/web-app-cache/a.md" })], root, names)], ["web-app-cache"], "prefix sibling is not a match");
+	assert.deepEqual([...touchedRepos([c({ command: "cd web-app; ls" })], root, names)], ["web-app"]);
+	assert.deepEqual([...touchedRepos([c({ command: "gh pr view 1 -R example-org/web-app" })], root, names)], [], "a GitHub repo name alone is not working in the folder");
+	assert.deepEqual([...touchedRepos([{ type: "user/message", data: { content: [{ type: "text", text: "/ws/iam" }] } }], root, names)], [], "only the agent's tool calls count");
+});
+
+test("scanRepos: real git, child repos and worktrees, changed and touched, no network", async () => {
+	const root = mkdtempSync(join(tmpdir(), "gh-scan-"));
+	try {
+		const origin = join(root, "origin.git");
+		sh(root, "init", "--bare", "-q", "-b", "main", origin);
+		const ws = join(root, "ws");
+		sh(root, "init", "-q", "-b", "main", join(ws, "alpha"));
+		writeFileSync(join(ws, "alpha", "a.txt"), "a\n");
+		sh(join(ws, "alpha"), "add", ".");
+		sh(join(ws, "alpha"), "commit", "-q", "-m", "init");
+		sh(join(ws, "alpha"), "remote", "add", "origin", origin);
+		sh(join(ws, "alpha"), "push", "-q", "-u", "origin", "main");
+		sh(join(ws, "alpha"), "remote", "set-head", "origin", "-a");
+		sh(join(ws, "alpha"), "worktree", "add", "-q", "-b", "feat/x", join(ws, "beta"));
+		writeFileSync(join(ws, "beta", "b.txt"), "b\n");
+		sh(join(ws, "beta"), "add", ".");
+		sh(join(ws, "beta"), "commit", "-q", "-m", "feat");
+		writeFileSync(join(ws, "alpha", "dirty.txt"), "d\n");
+		sh(root, "init", "-q", "-b", "main", join(ws, "gamma"));
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(join(ws, "notes"));
+		const listed = await childRepos(ws);
+		assert.deepEqual(listed.map((r) => [r.name, r.worktree]), [["alpha", false], ["beta", true], ["gamma", false]]);
+		const events = [{ type: "tool/call", data: { callId: "1", name: "bash", arguments: JSON.stringify({ workdir: "beta", command: "git log" }) } }];
+		const gh = async () => ({ ok: false, missing: true, out: "", err: "" });
+		const scan = await scanRepos(ws, { events, gh });
+		const by = Object.fromEntries(scan.repos.map((r) => [r.name, r]));
+		assert.equal(scan.root, ws);
+		assert.equal(by.alpha.dirty, 1);
+		assert.equal(by.alpha.changed, true);
+		assert.equal(by.alpha.touched, false);
+		assert.equal(by.beta.ahead, 1);
+		assert.equal(by.beta.branch, "feat/x");
+		assert.equal(by.beta.worktree, true);
+		assert.equal(by.beta.touched, true);
+		assert.equal(by.gamma.changed, false, "an empty repo with nothing to push is not a candidate");
+		await assert.rejects(scanRepos("relative"), /absolute/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("scanRepos: the branch's open PR comes from gh pr list, only for repos with changes", async () => {
+	const repoState = { "/ws/a": { ahead: "2", dirty: "" }, "/ws/b": { ahead: "0", dirty: "" } };
+	const run = async (cwd, args) => {
+		const st = repoState[cwd];
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, out: cwd };
+		if (args[0] === "rev-parse") return { ok: true, out: "feat/a" };
+		if (args[0] === "symbolic-ref") return { ok: true, out: "origin/main" };
+		if (args[0] === "remote") return { ok: true, out: "git@github.com:o/r.git" };
+		if (args[0] === "status") return { ok: true, out: st.dirty };
+		if (args[0] === "rev-list") return { ok: true, out: st.ahead };
+		return { ok: false, out: "" };
+	};
+	const ghCalls = [];
+	const gh = async (file, cwd, args) => { ghCalls.push(cwd); return { ok: true, out: JSON.stringify([{ number: 17, url: "https://github.com/o/r/pull/17" }]) }; };
+	const { mkdtempSync: mk, mkdirSync, writeFileSync: wf } = await import("node:fs");
+	const ws = mk(join(tmpdir(), "gh-scan2-"));
+	try {
+		for (const n of ["a", "b"]) { mkdirSync(join(ws, n)); mkdirSync(join(ws, n, ".git")); }
+		repoState[join(ws, "a")] = repoState["/ws/a"];
+		repoState[join(ws, "b")] = repoState["/ws/b"];
+		const scan = await scanRepos(ws, { run, gh });
+		const by = Object.fromEntries(scan.repos.map((r) => [r.name, r]));
+		assert.deepEqual(by.a.pr, { number: 17, url: "https://github.com/o/r/pull/17" });
+		assert.equal(by.b.pr, null);
+		assert.deepEqual(ghCalls, [join(ws, "a")], "unchanged repos are not looked up");
+	} finally {
+		rmSync(ws, { recursive: true, force: true });
+	}
+});
+
+const SCAN = { root: "/ws/acme-workspace", repos: [
+	{ name: "web-app", path: "/ws/acme-workspace/web-app", branch: "feature/harness-docs", ahead: 0, dirty: 2, changed: true, touched: true, worktree: false, pr: null },
+	{ name: "infra-cicd", path: "/ws/acme-workspace/infra-cicd", branch: "main", ahead: 0, dirty: 0, changed: false, touched: true, worktree: false, pr: null },
+	{ name: "studio", path: "/ws/acme-workspace/studio", branch: "feat/editor-data", ahead: 48, dirty: 0, changed: true, touched: false, worktree: false, pr: { number: 17, url: "https://github.com/x/pull/17" } },
+	{ name: "api-parallel-run", path: "/ws/acme-workspace/api-parallel-run", branch: "feature/ABC-156-parallel-run-plan", ahead: 1, dirty: 0, changed: true, touched: true, worktree: true, pr: null }
+] };
+
+test("createPr in a multi-repo folder: picker gets the scan, the chosen repos go into one /pr-creator message", async () => {
+	const sent = [];
+	const calls = [];
+	let picked = null;
+	const ctx = clientCtx({ cwd: SCAN.root, sent, calls, preflightResult: { ok: true, value: { status: "not-a-repo" } }, repos: SCAN });
+	const outcome = await mod.createPr(ctx, "s1", t, async (scan) => { picked = scan; return ["api-parallel-run", "web-app"]; });
+	assert.equal(picked, SCAN);
+	assert.deepEqual(calls.map((c) => c[0]), [PREFLIGHT_METHOD, REPOS_METHOD]);
+	assert.deepEqual(calls[1][1], { cwd: SCAN.root, sessionId: "s1" }, "the scan knows the session, so it can tell which repos it touched");
+	assert.equal(outcome.kind, "sent");
+	assert.deepEqual(outcome.repos, ["web-app", "api-parallel-run"], "in the scan's order");
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^\/pr-creator /, "the skill token leads, so DSH loads pr-creator");
+	assert.match(sent[0], /1\. `web-app`/);
+	assert.match(sent[0], /2\. `api-parallel-run`/);
+	assert.doesNotMatch(sent[0], /studio`/, "unchosen repos are not in the message");
+	const gesture = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g;
+	assert.deepEqual([...sent[0].matchAll(gesture)].map((m) => m[2]), ["pr-creator"]);
+});
+
+test("createPr in a multi-repo folder: cancel sends nothing; one changed repo skips the picker; none stops", async () => {
+	const sent = [];
+	const not = { ok: true, value: { status: "not-a-repo" } };
+	assert.equal((await mod.createPr(clientCtx({ cwd: SCAN.root, sent, preflightResult: not, repos: SCAN }), "s1", t, async () => null)).kind, "cancelled");
+	assert.equal(sent.length, 0);
+	const single = { root: SCAN.root, repos: [SCAN.repos[0], SCAN.repos[1]] };
+	const r = await mod.createPr(clientCtx({ cwd: SCAN.root, sent, preflightResult: not, repos: single }), "s1", t, async () => assert.fail("no picker for one repo"));
+	assert.deepEqual(r.repos, ["web-app"]);
+	assert.equal(sent.length, 1);
+	const none = { root: SCAN.root, repos: [SCAN.repos[1]] };
+	const n = await mod.createPr(clientCtx({ cwd: SCAN.root, sent, preflightResult: not, repos: none }), "s1", t, async () => assert.fail("no picker"));
+	assert.equal(n.kind, "stop");
+	assert.match(n.text, /None of the 1 repositories/);
+});
+
+test("defaultSelection: touched repos with changes", () => {
+	assert.deepEqual(mod.defaultSelection(SCAN.repos), ["web-app", "api-parallel-run"]);
+});
+
+const stubT = (key, params = {}) => (mod.en[key] ?? key).replace(/\{(\w+)\}/g, (_, k) => params[k]);
+
+test("repo picker: touched first, tags, unchanged named but not choosable, confirm passes the ticked names", () => {
+	const confirmed = [];
+	const modal = mod.RepoPicker({ scan: SCAN, t: stubT, onCancel: () => {}, onConfirm: (names) => confirmed.push(names) });
+	assert.equal(modal.type, "Modal");
+	assert.equal(modal.props.title, mod.en["picker.title"]);
+	assert.match(modal.props.description, /acme-workspace holds 4 repositories; 3 have new commits/);
+	const rows = find(modal, (n) => n.props?.className === "dsh-create-pr-repo");
+	const names = rows.map((r) => find(r, (n) => n.props?.className === "dsh-create-pr-repo-name")[0].children[0]);
+	assert.deepEqual(names, ["web-app", "api-parallel-run", "studio"], "touched first");
+	const checks = rows.map((r) => find(r, (n) => n.type === "Checkbox")[0].props.checked);
+	assert.deepEqual(checks, [true, true, false]);
+	assert.match(textOfTree(modal), /PR #17 exists/);
+	assert.match(textOfTree(modal), /used in this session/);
+	assert.match(textOfTree(modal), /worktree/);
+	assert.match(textOfTree(modal), /2 uncommitted files/);
+	assert.match(textOfTree(modal), /No changes, cannot be chosen: infra-cicd/);
+	const footer = find(modal.props.footer, (n) => n.type === "Button");
+	assert.equal(textOfTree(footer[1]), "Create PRs for 2 repositories");
+	footer[1].props.onClick();
+	assert.deepEqual(confirmed, [["web-app", "api-parallel-run"]]);
+});
+
+test("composer: several PRs show the latest with +N and a menu of all; one PR keeps the plain link", () => {
+	const prs = [
+		{ number: 176, url: U176, state: "open", title: "ABC-49: Record the sessions checks", repo: "example-org/website" },
+		{ number: 191, url: U191, state: "merged", title: "docs: Add harness docs", repo: "example-org/web-app" }
+	];
+	const props = (list) => ({ sessionId: "s1", useSession: (sel) => sel({ running: false }), useSessions: (sel) => sel({ byId: { s1: { origin: "user" } } }), usePrStatus: (sel) => sel({ s1: { prs: list, pr: list[0] ?? null } }), refreshStatus: () => {}, run: async () => {}, t: stubT });
+	const many = mod.CreatePrAction(props(prs));
+	assert.equal(many.children[0].type, mod.PrLinks);
+	const menu = mod.PrLinks({ prs, t: stubT });
+	assert.equal(menu.type, "Menu");
+	assert.deepEqual(menu.props.items.map((i) => i.id), ["head", U176, U191]);
+	assert.equal(menu.props.items[0].kind, "label");
+	assert.match(menu.props.items[0].text, /2 PRs linked/);
+	assert.match(textOfTree(menu.props.items[1].label), /#176 ABC-49.*example-org\/website · open · latest/s);
+	assert.match(textOfTree(menu.props.items[2].label), /merged/);
+	const anchor = find(menu.props.anchor, (n) => n.type === "button")[0];
+	assert.match(textOfTree(anchor), /#176/);
+	assert.match(textOfTree(anchor), /\+1/);
+	const one = mod.CreatePrAction(props([prs[0]]));
+	assert.equal(one.children[0].type, mod.PrLink);
+	const none = mod.CreatePrAction(props([]));
+	assert.equal(none.children[0], null);
+	assert.match(textOfTree(none), /Create PR/);
+});
+
+test("sidebar hover card: lists the session's PRs from the projection, with states when known", () => {
+	const props = (urls, known) => ({ sessionId: "s1", useSessions: (sel) => sel({ byId: { s1: { projectionValues: { [LINK_KEY]: urls } } } }), usePrStatus: (sel) => sel(known), t: stubT });
+	assert.equal(mod.SessionPrsHover(props([], {})), null);
+	assert.equal(mod.SessionPrsHover({ ...props([], {}), useSessions: (sel) => sel({ byId: {} }) }), null, "unknown session: nothing");
+	const card = mod.SessionPrsHover(props([U176, U191], { s1: { prs: [{ number: 176, url: U176, state: "open", title: "ABC-49" }] } }));
+	const text = textOfTree(card);
+	assert.match(text, /Linked PRs/);
+	assert.match(text, /website#176 · open/);
+	assert.match(text, /web-app#191/, "a PR not yet looked up still shows its number");
+});
+
+test("status store keeps every PR and only republishes when the list changes", async () => {
+	const answers = [[{ url: U176, state: "open", title: "a" }, { url: U191, state: "merged", title: "b" }], [{ url: U176, state: "open", title: "a" }, { url: U191, state: "merged", title: "b" }], { url: U176, state: "open", title: "a" }];
+	const store = mod.createStatusStore(async () => answers.shift());
+	let n = 0;
+	store.subscribe(() => { n += 1; });
+	await store.refresh("s", 0);
+	assert.equal(store.getSnapshot().s.prs.length, 2);
+	assert.equal(store.getSnapshot().s.pr.url, U176);
+	await store.refresh("s", 0);
+	assert.equal(n, 1, "same list: no new snapshot");
+	await store.refresh("s", 0);
+	assert.equal(store.getSnapshot().s.prs.length, 1, "an older single-PR answer is accepted");
+	assert.equal(n, 2);
 });

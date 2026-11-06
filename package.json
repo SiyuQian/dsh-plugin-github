@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-github",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "GitHub in DeepSeek Harness: a sidebar tab with your open PRs and review requests, one-click Chinese walkthroughs and devpilot pr-review reviews in throwaway checkouts, a Create PR button, and PR titles on sessions.",
   "license": "MIT",
   "type": "module",

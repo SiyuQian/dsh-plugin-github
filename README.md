@@ -60,14 +60,15 @@ A checkout whose session is running is never deleted. Recycling runs 30 seconds 
   > /pr-creator Create a pull request for the current branch (or update the existing one).
 
   If the git check fails for any reason, the prompt is still sent; the skill runs its own full preflight.
-- **PR link.** When a session has a pull request, a link such as `#191` appears just left of the button, with a dot for its state (green open, grey draft, purple merged, red closed). Hover shows the title. Clicking it opens the PR in your default browser (Chrome on this Mac). While the PR is open or a draft, the button reads **Update PR**.
+- **Multi-repo folders.** When the session folder is not a repository but holds several (for example a workspace with one folder per repo), **Create PR** checks every repository in it. If none has new commits or uncommitted changes, it says so. If exactly one does, it goes straight ahead. If several do, a picker lists them with their branch, commits ahead, uncommitted files, whether this session worked in them, and any open PR for the branch. Repositories this session worked in (seen from its own commands and file paths) are ticked; repositories without changes are listed but cannot be chosen. One message then asks the agent to run pr-creator on each chosen repository in turn.
+- **PR link.** When a session has a pull request, a link such as `#191` appears just left of the button, with a dot for its state (green open, grey draft, purple merged, red closed). Hover shows the title. Clicking it opens the PR in your default browser (Chrome on this Mac). While the PR is open or a draft, the button reads **Update PR**. A session linked to several PRs shows the most recent one with **+N**; clicking it lists them all, most recent first, and choosing one opens it.
 - **Sidebar title.** A session linked to a PR is renamed `#191 <PR title>`, so the sidebar shows which PR each session is about. The title follows the PR if it is renamed on GitHub.
 
   A session is linked to a PR when:
   - you paste a PR link into your message (for example, `https://github.com/.../pull/191 improve the docs`), or
   - the agent runs `gh pr create` (or `glab mr create`) and it prints the new PR's URL.
 
-  The latest of these wins. A PR the agent only views, edits, or mentions does not link the session. A session with neither shows no PR link, even if its folder's current branch has a PR: a new session in a checkout left on an old branch should not inherit that branch's (often merged) PR.
+  Every linked PR is kept (up to 12), most recent first; the title follows the most recent one. Hovering over the session in the sidebar lists them all. A PR the agent only views, edits, or mentions does not link the session. A session with neither shows no PR link, even if its folder's current branch has a PR: a new session in a checkout left on an old branch should not inherit that branch's (often merged) PR.
 
   A title you set yourself (double-click to rename) is never overwritten. Subagent sessions are never renamed.
 
