@@ -7,9 +7,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	PREFLIGHT_METHOD, PROVIDER_NAME, REVIEW_METHODS, SKILL_DIR, SKILL_NAME, VENDOR_ROOT,
-	INBOX_METHOD, INBOX_QUERIES, LINK_KEY, REPOS_METHOD, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, createSkillProvider, foldLink, hostOf, linkOf, nextTitle,
-	parseSkill, prByUrl, preflight, preflightRoute, prTitle, sessionStatusRoute
+	PREFLIGHT_METHOD, PROMPTS_METHOD, SKILLS_METHOD, REVIEW_METHODS, PROMPT_DEFAULTS, Config, resolveConfig, fillTemplate, leadingSkills, missingSkills, missingSkillsRoute, promptsRoute,
+	INBOX_METHOD, INBOX_QUERIES, LINK_KEY, REPOS_METHOD, SESSION_STATUS_METHOD, apply, argumentText, inbox, inboxRow, createLinkManager, foldLink, hostOf, linkOf, nextTitle,
+	prByUrl, preflight, preflightRoute, prTitle, sessionStatusRoute
 } from "./lib/index.js";
 
 let mod;
@@ -19,71 +19,50 @@ const stubReact = { createElement: (type, props, ...children) => ({ type, props,
 globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory((n) => ({ react: stubReact, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[n] ?? null); } } };
 new Function(readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"))();
 
-// --- skill provider ---------------------------------------------------------
+// --- no skills; prompt config -----------------------------------------------
 
-test("vendored SKILL.md parses to a one-line description and a body", () => {
-	const { description, content } = parseSkill(readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8"));
-	assert.match(description, /^Use when the user wants to create or update a pull request/);
-	assert.doesNotMatch(description, /\n/);
-	assert.match(content, /^# Pull Request \/ Merge Request Skill/);
+test("the package ships no skills and no vendored copies", () => {
+	const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+	assert.deepEqual(pkg.files.filter((f) => f === "vendor" || f === "skills"), []);
+	assert.equal(pkg.scripts["sync-devpilot"], undefined);
+	for (const dir of ["vendor", "skills"]) assert.equal(existsSync(new URL(`./${dir}`, import.meta.url)), false, dir);
 });
 
-test("folded and inline descriptions both parse", () => {
-	assert.equal(parseSkill("---\nname: x\ndescription: >\n  one\n  two\nlicense: y\n---\nbody").description, "one two");
-	assert.equal(parseSkill("---\ndescription: \"plain\"\n---\nbody").description, "plain");
-	assert.throws(() => parseSkill("no frontmatter"));
+test("config defaults keep today's prompts; partial config fills the rest", () => {
+	assert.deepEqual(resolveConfig(undefined), PROMPT_DEFAULTS);
+	assert.deepEqual(Config({}), PROMPT_DEFAULTS);
+	assert.match(PROMPT_DEFAULTS.reviewPrompt, /^\/pr-explain \/pr-review \{url\}\n/);
+	assert.match(PROMPT_DEFAULTS.explainPrompt, /^\/pr-explain \{url\}\n/);
+	assert.equal(PROMPT_DEFAULTS.createPrPrompt, "", "empty = the built-in locale text");
+	const c = resolveConfig({ reviewPrompt: "/my-review {url}", createPrPrompt: 7 });
+	assert.equal(c.reviewPrompt, "/my-review {url}");
+	assert.equal(c.createPrPrompt, "");
+	assert.equal(c.explainPrompt, PROMPT_DEFAULTS.explainPrompt);
 });
 
-test("provider lists pr-creator, pr-review, and pr-explain as bundled, user- and model-invocable", async () => {
-	const provider = createSkillProvider();
-	assert.equal(provider.name, PROVIDER_NAME);
-	const candidates = await provider.list();
-	assert.deepEqual(candidates.map((c) => c.name), ["pr-creator", "pr-review", "pr-explain"]);
-	for (const c of candidates) {
-		assert.equal(c.provider, PROVIDER_NAME);
-		assert.deepEqual(c.invocation, { modelInvocable: true, userInvocable: true });
-		assert.equal(c.rank, 600);
-		assert.equal(c.resourceBase.kind, "directory");
-		assert.ok(readFileSync(c.path, "utf8").startsWith("---"), c.path);
-		assert.ok(c.description.length > 40, `${c.name} has a real description`);
-	}
-	assert.equal(candidates[0].name, SKILL_NAME);
+test("templates: known placeholders filled, unknown kept", () => {
+	assert.equal(fillTemplate("{a} {b} {a}", { a: 1 }), "1 {b} 1");
 });
 
-test("devpilot skills load with the host note; DEVPILOT_PLUGIN_ROOT points at a complete install", async () => {
-	const provider = createSkillProvider();
-	const byName = Object.fromEntries((await provider.list()).map((c) => [c.name, c]));
-	const creator = await provider.get(byName["pr-creator"], { signal: new AbortController().signal });
-	assert.equal(creator.rank, undefined, "rank is a candidate-only field");
-	assert.match(creator.content, /^## DeepSeek Harness notes/);
-	assert.match(creator.content, /# Pull Request \/ Merge Request Skill/);
-	const root = /prefix the command with `DEVPILOT_PLUGIN_ROOT=([^`]+)`/.exec(creator.content)[1];
-	assert.equal(root, VENDOR_ROOT);
-	// devpilot's own resolver accepts the vendored copy and finds what pr-review needs.
-	for (const [args, tail] of [[["scripts/codegraph.sh"], "scripts/codegraph.sh"], [["--skill", "babysit-prs", "scripts/risk.py"], "babysit-prs/scripts/risk.py"], [["--skill", "pr-review", "scripts/check-review.py"], "pr-review/scripts/check-review.py"]]) {
-		const out = execFileSync("python3", [join(root, "scripts/resolve-installed-resource.py"), ...args], { encoding: "utf8", env: { ...process.env, DEVPILOT_PLUGIN_ROOT: root } }).trim();
-		assert.ok(out.endsWith(tail), out);
-	}
-	const review = await provider.get(byName["pr-review"], { signal: new AbortController().signal });
-	assert.match(review.content, /Run the capability selector with `--safe-mutation` only/);
-	assert.match(review.content, /# PR Review/);
-	const explain = await provider.get(byName["pr-explain"], { signal: new AbortController().signal });
-	assert.doesNotMatch(explain.content, /DeepSeek Harness notes/, "our own skill needs no devpilot note");
-	assert.match(explain.content, /read-only/i);
-	assert.match(explain.content, /## PR 中文解读/);
+test("leading skill tokens", () => {
+	assert.deepEqual(leadingSkills("/pr-explain /pr-review https://x"), ["pr-explain", "pr-review"]);
+	assert.deepEqual(leadingSkills("  /pr-creator Create"), ["pr-creator"]);
+	assert.deepEqual(leadingSkills("Please run /pr-creator"), []);
 });
 
-test("capability selector: the flags the note prescribes give degraded, not unsupported", () => {
-	const out = JSON.parse(execFileSync("python3", [join(VENDOR_ROOT, "scripts/select-capability.py"), "pr-review", "--safe-mutation"], { encoding: "utf8" }));
-	assert.equal(out.level, "degraded");
-	assert.equal(out.supported, true);
-	assert.equal(out.stop_before_mutation, false);
+test("missingSkills: reads the session skill catalog; unknown is null", async () => {
+	const catalog = { list: async ({ sessionId }) => { assert.equal(sessionId, "s1"); return { skills: [{ name: "pr-explain" }] }; } };
+	assert.deepEqual(await missingSkills(catalog, "s1", "/pr-explain /pr-review u"), ["pr-review"]);
+	assert.deepEqual(await missingSkills(catalog, "s1", "no tokens"), []);
+	assert.equal(await missingSkills(undefined, "s1", "/pr-review u"), null);
+	assert.equal(await missingSkills({ list: async () => { throw new Error("x"); } }, "s1", "/pr-review u"), null);
 });
 
-test("the relative links the skill follows exist in the vendored copy", () => {
-	for (const rel of ["../../docs/task-tracking.md", "references/visual-evidence.md", "templates/backend-feature.md", "templates/frontend-bugfix.md"]) {
-		assert.ok(readFileSync(join(SKILL_DIR, rel), "utf8").length > 0, rel);
-	}
+test("prompt and skill routes", async () => {
+	const prompts = promptsRoute(resolveConfig({ createPrPrompt: "/x go" }));
+	assert.equal(prompts.path, `/api/${PROMPTS_METHOD}`);
+	const skills = missingSkillsRoute(() => ({ list: async () => ({ skills: [] }) }));
+	assert.equal(skills.path, `/api/${SKILLS_METHOD}`);
 });
 
 // --- preflight --------------------------------------------------------------
@@ -167,10 +146,10 @@ test("route answers the client-request envelope", async () => {
 	assert.match(relative.result.error.message, /absolute/);
 });
 
-test("host apply registers the provider, the routes, and the session listeners", () => {
+test("host apply registers no skill provider, only routes and session listeners", () => {
 	const seen = [];
 	const scope = {
-		skills: { registerProvider: (create) => seen.push(["provider", create({ signal: undefined, invalidate() {} }).name]) },
+		skills: { registerProvider: () => seen.push(["provider"]) },
 		get: (n) => ({
 			connection: { fetch: { register: (route) => seen.push(["route", route.path]) } },
 			sessions: { get: () => undefined }
@@ -185,15 +164,16 @@ test("host apply registers the provider, the routes, and the session listeners",
 	globalThis.setTimeout = (fn, ms) => { timers.push(["timeout", ms]); return { unref() {} }; };
 	globalThis.setInterval = (fn, ms) => { timers.push(["interval", ms]); return { unref() {} }; };
 	try {
-		apply({ inject: (_deps, cb) => cb(scope) });
+		apply({ inject: (deps, cb) => { assert.ok(!deps.includes("skills")); cb(scope); } }, {});
 	} finally {
 		globalThis.setTimeout = realSetTimeout;
 		globalThis.setInterval = realSetInterval;
 	}
 	assert.deepEqual(seen, [
-		["provider", PROVIDER_NAME],
 		["route", `/api/${PREFLIGHT_METHOD}`],
 		["route", `/api/${INBOX_METHOD}`],
+		["route", `/api/${PROMPTS_METHOD}`],
+		["route", `/api/${SKILLS_METHOD}`],
 		...Object.values(REVIEW_METHODS).map((m) => ["route", `/api/${m}`]),
 		["on", "session/event"],
 		["route", `/api/${SESSION_STATUS_METHOD}`],
@@ -426,7 +406,7 @@ test("status store: concurrent refreshes share one lookup", async () => {
 
 const t = (key, params = {}) => mod.en[key].replace(/\{(\w+)\}/g, (_, k) => params[k]);
 
-function clientCtx({ cwd = "/repo", preflightResult, sent = [], rpcThrows = false, repos, calls = [] }) {
+function clientCtx({ cwd = "/repo", preflightResult, sent = [], rpcThrows = false, repos, calls = [], prompts = {}, missing = [] }) {
 	const conversation = { send: async (text) => { sent.push(text); }, input: { for: () => ({ notify() {} }) } };
 	return {
 		get: (n) => ({
@@ -435,6 +415,8 @@ function clientCtx({ cwd = "/repo", preflightResult, sent = [], rpcThrows = fals
 				if (rpcThrows) throw new Error("offline");
 				assert.equal(ch, "/api");
 				if (m === REPOS_METHOD) return { ok: true, value: repos };
+				if (m === PROMPTS_METHOD) return { ok: true, value: prompts };
+				if (m === SKILLS_METHOD) return { ok: true, value: { missing } };
 				assert.equal(m, PREFLIGHT_METHOD);
 				assert.deepEqual(payload, { cwd });
 				return preflightResult;
@@ -458,6 +440,24 @@ test("sends a /pr-creator prompt when there is work to PR", async () => {
 test("both prompts open with the skill token", () => {
 	for (const dict of [mod.en, mod.zh]) assert.match(dict.prompt, /^\/pr-creator\s/);
 	assert.deepEqual(Object.keys(mod.zh).sort(), Object.keys(mod.en).sort());
+});
+
+test("configured create-PR prompt replaces the built-in text", async () => {
+	const sent = [];
+	const ok = { ok: true, value: { status: "ok", branch: "f", base: "origin/main", ahead: 1, dirty: 0 } };
+	await mod.createPr(clientCtx({ sent, preflightResult: ok, prompts: { createPrPrompt: "/ship it" } }), "s1", t);
+	assert.deepEqual(sent, ["/ship it"]);
+	const multi = mod.multiPrompt(t, "/ws", [{ name: "a", path: "/ws/a", branch: "b", pr: null }], "/x {n} {root}\n{list}");
+	assert.equal(multi, "/x 1 /ws\n1. `a` (`/ws/a`, b)");
+});
+
+test("a missing skill shows the install notice instead of sending", async () => {
+	const sent = [];
+	const ok = { ok: true, value: { status: "ok", branch: "f", base: "origin/main", ahead: 1, dirty: 0 } };
+	const outcome = await mod.createPr(clientCtx({ sent, preflightResult: ok, missing: ["pr-creator"] }), "s1", t);
+	assert.deepEqual(outcome, { kind: "stop", text: "Install a plugin that provides /pr-creator (for example dsh-plugin-devpilot)" });
+	assert.equal(sent.length, 0);
+	assert.equal(mod.zh.missingSkill.replace("{names}", "/pr-creator"), "需要安装提供 /pr-creator 的插件（例如 dsh-plugin-devpilot）");
 });
 
 test("stops without sending when the folder is not a repo and holds none", async () => {
@@ -918,6 +918,12 @@ test("list: reports size, running, archived and why each would be recycled", asy
 });
 
 
+test("review prompt: a configured template with placeholders", () => {
+	const entry = { url: "https://github.com/o/r/pull/9", number: 9, path: "/p", head: "0123456789abcdef", base: "main" };
+	assert.equal(reviewPrompt(entry, "review", { reviewPrompt: "/rv {url} #{number} {path} {head} {base} {other}" }), "/rv https://github.com/o/r/pull/9 #9 /p 0123456789ab main {other}");
+	assert.equal(reviewPrompt(entry, "explain", { explainPrompt: "/ex {url}" }), "/ex https://github.com/o/r/pull/9");
+});
+
 test("review prompt: both skill tokens, checkout path, post to GitHub, Chinese summary", () => {
 	const entry = { url: "https://github.com/o/r/pull/193", number: 193, path: "/x/wt/o/r/pr-193", head: "3b7fbd6a4e39c5b0", base: "next" };
 	const review = reviewPrompt(entry, "review");
@@ -966,6 +972,7 @@ test("startReview: prepare, create session in the checkout, bind, name, open, th
 		["github.review.bind", { path: "/ws/pr-193", sessionId: "s-new" }],
 		["rename", "s-new", "审查 #193 ABC-242: push token"],
 		["open", "s-new"],
+		["github.missingSkills", { sessionId: "s-new", text: "/pr-explain /pr-review https://x/pull/193\n..." }],
 		["send", "/pr-explain /pr-review https://x/pull/193"]
 	]);
 });
@@ -1230,7 +1237,7 @@ test("createPr in a multi-repo folder: picker gets the scan, the chosen repos go
 	const ctx = clientCtx({ cwd: SCAN.root, sent, calls, preflightResult: { ok: true, value: { status: "not-a-repo" } }, repos: SCAN });
 	const outcome = await mod.createPr(ctx, "s1", t, async (scan) => { picked = scan; return ["api-parallel-run", "web-app"]; });
 	assert.equal(picked, SCAN);
-	assert.deepEqual(calls.map((c) => c[0]), [PREFLIGHT_METHOD, REPOS_METHOD]);
+	assert.deepEqual(calls.map((c) => c[0]), [PREFLIGHT_METHOD, REPOS_METHOD, PROMPTS_METHOD, SKILLS_METHOD]);
 	assert.deepEqual(calls[1][1], { cwd: SCAN.root, sessionId: "s1" }, "the scan knows the session, so it can tell which repos it touched");
 	assert.equal(outcome.kind, "sent");
 	assert.deepEqual(outcome.repos, ["web-app", "api-parallel-run"], "in the scan's order");

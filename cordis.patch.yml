@@ -1,6 +1,6 @@
-# Mounts the host half (pr-creator skill provider and the read-only git
-# preflight route); the client half is discovered from `dsh.client` in
-# package.json.
+# Mounts the host half (git preflight, PR inbox, review workspaces, prompt
+# config); the client half is discovered from `dsh.client` in package.json.
+# This plugin registers no skills.
 - insert:
     - id: github
       name: dsh-plugin-github
