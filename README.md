@@ -7,7 +7,7 @@ A DeepSeek Harness plugin for working with GitHub. It adds:
 - a **Create PR** button in the message box;
 - a PR link in the message box, and PR titles on sessions in the sidebar.
 
-The buttons send prompts that invoke skills (`/pr-creator`, `/pr-explain`, `/pr-review` by default). **This plugin registers no skills**: install a plugin that provides them, such as [dsh-plugin-devpilot](https://github.com/SiyuQian/dsh-plugin-devpilot), or point the prompts at your own skills (see [Configuration](#configuration)).
+The buttons send prompts that invoke skills (`/pr-creator`, `/pr-explain`, `/pr-review` by default). **This plugin registers no skills**: install a plugin or skill folder that provides them, or point the prompts at your own skills (see [Configuration](#configuration)).
 
 Everything reads GitHub through your own `gh` login. Tested only against DeepSeek Harness 0.2.1-rc.5. It uses internal APIs that may change between releases.
 
@@ -75,9 +75,9 @@ A checkout whose session is running is never deleted. Recycling runs 30 seconds 
   A title you set yourself (double-click to rename) is never overwritten. Subagent sessions are never renamed.
 
   PR details come from `gh pr view` (or `glab mr view`), using the CLI's own login. They are looked up when the session opens, after each agent turn ends, as soon as a link is pasted or a PR is created, and when you switch back to the app from another window (at most every 15 seconds). If a lookup fails, the last known link stays on screen.
-- **Missing skills.** Before sending any prompt, the plugin reads the session's skill catalog (DSH's `skills/list`). If the prompt starts with `/name` tokens that no installed plugin provides, it shows 需要安装提供 /name 的插件（例如 dsh-plugin-devpilot） (or the English equivalent) and sends nothing. If the catalog cannot be read, the prompt is sent anyway.
+- **Missing skills.** Before sending any prompt, the plugin reads the session's skill catalog (DSH's `skills/list`). If the prompt starts with `/name` tokens that no installed plugin provides, it shows 需要安装提供 /name 的插件 (or the English equivalent) and sends nothing. If the catalog cannot be read, the prompt is sent anyway.
 
-The skill does the actual work (with dsh-plugin-devpilot's `pr-creator`: read the diff, branch, commit, push, fill in the PR template, and create or update the PR with `gh` or `glab`). See that plugin for the skills' rules.
+The skill does the actual work, for example reading the diff, committing, pushing, and creating or updating the PR with `gh` or `glab`. See the skill's own documentation for its rules.
 
 The button is disabled while the agent is running and hidden in subagent sessions.
 
@@ -85,13 +85,13 @@ The button is disabled while the agent is running and hidden in subagent session
 
 - `gh`, logged in (`gh auth login`) with an account that can see your repositories. GitLab MRs work in the message box through `glab`; the GitHub tab is GitHub only.
 - `git`.
-- A plugin that provides the skills the prompts name (for example dsh-plugin-devpilot).
+- Skills with the names the prompts use, from a plugin or your own skill folder.
 
 ## Install
 
 In DeepSeek Harness, open **Plugins > Add plugin**. Enter the absolute path of a local checkout, or this repository's Git URL. Restart the app if the GitHub tab or the button does not appear.
 
-Install a skills plugin as well, for example [dsh-plugin-devpilot](https://github.com/SiyuQian/dsh-plugin-devpilot), which provides `pr-creator`, `pr-review`, and `pr-explain`.
+Also install skills named `pr-creator`, `pr-review`, and `pr-explain` (from a plugin or your own skill folder), or change the prompts to use skills you already have.
 
 ## Configuration
 

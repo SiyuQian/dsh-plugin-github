@@ -455,9 +455,9 @@ test("a missing skill shows the install notice instead of sending", async () => 
 	const sent = [];
 	const ok = { ok: true, value: { status: "ok", branch: "f", base: "origin/main", ahead: 1, dirty: 0 } };
 	const outcome = await mod.createPr(clientCtx({ sent, preflightResult: ok, missing: ["pr-creator"] }), "s1", t);
-	assert.deepEqual(outcome, { kind: "stop", text: "Install a plugin that provides /pr-creator (for example dsh-plugin-devpilot)" });
+	assert.deepEqual(outcome, { kind: "stop", text: "Install a plugin that provides /pr-creator" });
 	assert.equal(sent.length, 0);
-	assert.equal(mod.zh.missingSkill.replace("{names}", "/pr-creator"), "需要安装提供 /pr-creator 的插件（例如 dsh-plugin-devpilot）");
+	assert.equal(mod.zh.missingSkill.replace("{names}", "/pr-creator"), "需要安装提供 /pr-creator 的插件");
 });
 
 test("stops without sending when the folder is not a repo and holds none", async () => {
