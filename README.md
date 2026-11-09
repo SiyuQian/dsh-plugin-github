@@ -1,4 +1,4 @@
-# dsh-plugin-github
+# @siyuqian/dsh-plugin-github
 
 A DeepSeek Harness plugin for working with GitHub. It adds:
 
@@ -89,13 +89,15 @@ The button is disabled while the agent is running and hidden in subagent session
 
 ## Install
 
-In DeepSeek Harness, open **Plugins > Add plugin**. Enter the absolute path of a local checkout, or this repository's Git URL. Restart the app if the GitHub tab or the button does not appear.
+After the scoped package is published, open **Plugins > Add plugin** in DeepSeek Harness and enter `@siyuqian/dsh-plugin-github` (or an exact `@siyuqian/dsh-plugin-github@<version>`). Use the public npm registry `https://registry.npmjs.org/`. Do not install the unscoped npm package `dsh-plugin-github`: it belongs to another publisher.
+
+A local checkout or this repository's Git URL still works for development, but DSH's native npm version checks require a registry installation. See [Release and native update checks](RELEASING.md) for preparation, migration from the old package identity, and verification. Follow DSH's installation result if it requests a restart.
 
 Also install skills named `pr-creator`, `pr-review`, and `pr-explain` (from a plugin or your own skill folder), or change the prompts to use skills you already have.
 
 ## Configuration
 
-Every prompt the plugin sends is a template in the plugin's config (Plugins > dsh-plugin-github > settings, or `cordis.patch.yml`). Placeholders are written `{name}`; unknown placeholders are left as written. Leading `/name` tokens are skill tokens: DSH loads those skills for the turn.
+Every prompt the plugin sends is a template in the plugin's config (Plugins > @siyuqian/dsh-plugin-github > settings, or `cordis.patch.yml`). Placeholders are written `{name}`; unknown placeholders are left as written. Leading `/name` tokens are skill tokens: DSH loads those skills for the turn.
 
 | Key | Used for | Placeholders | Default |
 |---|---|---|---|
@@ -109,7 +111,7 @@ For example, to review with your own skill:
 ```yaml
 - insert:
     - id: github
-      name: dsh-plugin-github
+      name: '@siyuqian/dsh-plugin-github'
       config:
         reviewPrompt: "/my-review {url}\nThe code is checked out in `{path}` at `{head}`, base `origin/{base}`."
 ```
@@ -137,4 +139,4 @@ The client tests use a stub context and check the wiring, not the real app. The 
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The inventory icon in `icon.svg` is original artwork distributed under the same license. Existing in-app English and Chinese dictionaries are unchanged.

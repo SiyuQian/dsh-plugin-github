@@ -3,4 +3,4 @@
 # This plugin registers no skills.
 - insert:
     - id: github
-      name: dsh-plugin-github
+      name: '@siyuqian/dsh-plugin-github'
