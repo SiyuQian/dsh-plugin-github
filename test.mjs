@@ -19,6 +19,17 @@ const stubReact = { createElement: (type, props, ...children) => ({ type, props,
 globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory((n) => ({ react: stubReact, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[n] ?? null); } } };
 new Function(readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"))();
 
+test("the shipped client resolves under the scoped package identity", () => {
+	const factories = new Map();
+	const page = { __ModuleLoader__: { load: ({ id, factory }) => factories.set(id, factory) } };
+	new Function("window", readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"))(page);
+	const factory = factories.get("@siyuqian/dsh-plugin-github");
+	assert.equal(typeof factory, "function", "DSH must find the client by its manifest package name");
+	const client = factory((id) => ({ react: stubReact, "@deepseek-ai/dsh-client-ui-primitives": stubPrimitives })[id]);
+	assert.equal(typeof client.apply, "function");
+	assert.equal(client.LINK_KEY, "githubPrLinks", "existing session projection identity is retained");
+});
+
 // --- no skills; prompt config -----------------------------------------------
 
 test("the package ships no skills and no vendored copies", () => {

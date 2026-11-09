@@ -1,5 +1,9 @@
 {
-  "name": "dsh-plugin-github",
+  "name": "@siyuqian/dsh-plugin-github",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "version": "0.8.0",
   "description": "GitHub in DeepSeek Harness: a sidebar tab with your open PRs and review requests, one-click PR walkthroughs and reviews in throwaway checkouts, a Create PR button, and PR titles on sessions. Prompts are configurable; the skills they invoke come from a separate plugin or your own skill folder.",
   "license": "MIT",
@@ -8,10 +12,15 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
     "lib",
+    "locale/*.json",
+    "icon.svg",
+    "RELEASING.md",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
